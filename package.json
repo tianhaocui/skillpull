@@ -1,0 +1,31 @@
+{
+  "name": "skillpull",
+  "version": "0.2.0",
+  "description": "Sync AI agent skills from Git repositories to Claude, Codex, Kiro, and Cursor",
+  "bin": {
+    "skillpull": "./skillpull"
+  },
+  "keywords": [
+    "ai",
+    "skills",
+    "claude",
+    "codex",
+    "kiro",
+    "cursor",
+    "agent",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "files": [
+    "skillpull",
+    "install.sh"
+  ],
+  "os": [
+    "linux",
+    "darwin"
+  ]
+}

@@ -1,0 +1,765 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.2.0"
+MANIFEST_FILE=".skillpull.json"
+TMPDIR_PREFIX="skillpull"
+CONFIG_DIR="$HOME/.config/skillpull"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# ── Agent targets ──
+# Format: PROJECT_DIR|GLOBAL_DIR|FORMAT
+# FORMAT: skill = SKILL.md folder, mdc = .cursor/rules/*.mdc
+declare -A AGENT_PROJECT AGENT_GLOBAL AGENT_FORMAT
+AGENT_PROJECT=(
+  [claude]=".claude/skills"
+  [codex]=".codex/skills"
+  [kiro]=".kiro/skills"
+  [cursor]=".cursor/rules"
+)
+AGENT_GLOBAL=(
+  [claude]="$HOME/.claude/skills"
+  [codex]="$HOME/.codex/skills"
+  [kiro]="$HOME/.kiro/skills"
+  [cursor]=""  # Cursor has no global file-based rules
+)
+AGENT_FORMAT=(
+  [claude]="skill"
+  [codex]="skill"
+  [kiro]="skill"
+  [cursor]="mdc"
+)
+
+DEFAULT_AGENT="claude"
+
+# ── Colors ──
+RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
+CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
+
+info()  { [[ "${QUIET:-0}" == "1" ]] || printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
+warn()  { printf "  ${YELLOW}!${RESET} %s\n" "$*" >&2; }
+err()   { printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
+dim()   { [[ "${QUIET:-0}" == "1" ]] || printf "  ${DIM}%s${RESET}\n" "$*"; }
+
+# ── Cleanup ──
+_TMPDIR=""
+cleanup() { [[ -n "${_TMPDIR:-}" && -d "${_TMPDIR:-}" ]] && rm -rf "$_TMPDIR" || true; }
+trap cleanup EXIT
+
+make_tmp() { _TMPDIR="$(mktemp -d "/tmp/${TMPDIR_PREFIX}.XXXXXX")"; }
+
+# ── Config helpers ──
+ensure_config() {
+  mkdir -p "$CONFIG_DIR"
+  [[ -f "$CONFIG_FILE" ]] || echo '{"aliases":{},"registry":""}' > "$CONFIG_FILE"
+}
+
+read_config_key() {
+  local key="$1"
+  [[ ! -f "$CONFIG_FILE" ]] && { echo ""; return 0; }
+  local val
+  val="$(grep -o "\"${key}\":\"[^\"]*\"" "$CONFIG_FILE" 2>/dev/null | head -1 | \
+    sed "s/\"${key}\":\"//" | sed 's/"$//')" || true
+  echo "$val"
+}
+
+read_alias() {
+  local name="$1"
+  [[ ! -f "$CONFIG_FILE" ]] && { echo ""; return 0; }
+  local val
+  val="$(sed -n '/"aliases"/,/}/p' "$CONFIG_FILE" 2>/dev/null | \
+    grep -o "\"${name}\":\"[^\"]*\"" | head -1 | \
+    sed "s/\"${name}\":\"//" | sed 's/"$//')" || true
+  echo "$val"
+}
+
+write_alias() {
+  local name="$1" url="$2"
+  ensure_config
+  local esc_url; esc_url="$(_json_escape "$url")"
+  if grep -q "\"${name}\"" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|\"${name}\":\"[^\"]*\"|\"${name}\":\"${esc_url}\"|" "$CONFIG_FILE"
+  else
+    # Insert into aliases object
+    sed -i "s|\"aliases\":{|\"aliases\":{\"${name}\":\"${esc_url}\",|" "$CONFIG_FILE"
+    # Clean trailing comma before }
+    sed -i 's/,}/}/g' "$CONFIG_FILE"
+  fi
+}
+
+remove_alias() {
+  local name="$1"
+  ensure_config
+  if ! grep -q "\"${name}\"" "$CONFIG_FILE" 2>/dev/null; then
+    err "Alias '$name' not found"
+    return 1
+  fi
+  # Remove the alias entry
+  sed -i "s|\"${name}\":\"[^\"]*\",\?||" "$CONFIG_FILE"
+  # Clean up double commas and trailing commas
+  sed -i 's/,,/,/g; s/,}/}/g; s/{,/{/g' "$CONFIG_FILE"
+  info "Alias '$name' removed"
+}
+
+list_aliases() {
+  ensure_config
+  local aliases
+  aliases="$(sed -n '/"aliases"/,/}/p' "$CONFIG_FILE" 2>/dev/null)" || true
+  local entries
+  entries="$(echo "$aliases" | grep -oP '"[^"]+":"[^"]+"' | grep -v '"aliases"')" || true
+  if [[ -z "$entries" ]]; then
+    warn "No aliases configured"
+    return 0
+  fi
+  printf "\n  ${CYAN}%-20s %s${RESET}\n" "ALIAS" "URL"
+  printf "  %-20s %s\n" "────────────────────" "────────────────────────────────────────"
+  echo "$entries" | while IFS= read -r line; do
+    local aname aurl
+    aname="$(echo "$line" | sed 's/"\([^"]*\)".*/\1/')"
+    aurl="$(echo "$line" | sed 's/[^:]*:"\([^"]*\)"/\1/')"
+    printf "  %-20s %s\n" "$aname" "$aurl"
+  done
+  echo
+}
+
+set_registry() {
+  local url="$1"
+  ensure_config
+  local esc_url; esc_url="$(_json_escape "$url")"
+  sed -i "s|\"registry\":\"[^\"]*\"|\"registry\":\"${esc_url}\"|" "$CONFIG_FILE"
+  info "Default registry set to: $url"
+}
+
+# ── URL resolution ──
+# Supports: full URL, user/repo shortname, @alias, bare skill name (from registry)
+resolve_repo_url() {
+  local input="$1"
+
+  # @alias
+  if [[ "$input" == @* ]]; then
+    local alias_name="${input#@}"
+    local alias_url; alias_url="$(read_alias "$alias_name")"
+    if [[ -z "$alias_url" ]]; then
+      err "Alias '$alias_name' not found. Use 'skillpull alias list' to see aliases."
+      return 1
+    fi
+    echo "$alias_url"
+    return
+  fi
+
+  # Full URL (contains :// or starts with git@)
+  if [[ "$input" == *"://"* || "$input" == git@* ]]; then
+    echo "$input"
+    return
+  fi
+
+  # user/repo shortname (contains exactly one /)
+  if [[ "$input" == */* && "$(echo "$input" | tr -cd '/' | wc -c)" == "1" ]]; then
+    echo "https://github.com/${input}.git"
+    return
+  fi
+
+  # Bare name -> try registry
+  local registry; registry="$(read_config_key "registry")"
+  if [[ -n "$registry" ]]; then
+    # Treat registry as a repo URL, skill name as filter
+    echo "$registry"
+    return
+  fi
+
+  # Nothing matched
+  err "Cannot resolve '$input'. Use a URL, user/repo, or @alias."
+  return 1
+}
+
+# ── Frontmatter parsing ──
+parse_frontmatter() {
+  local file="$1" key="$2"
+  local block
+  block="$(sed -n '1{/^---$/!q};1,/^---$/{/^---$/d;p}' "$file" 2>/dev/null)" || true
+  local val
+  val="$(echo "$block" | grep -E "^${key}:" | head -1 | \
+    sed "s/^${key}:[[:space:]]*//" | sed "s/^['\"]//;s/['\"]$//")" || true
+  echo "$val"
+}
+
+# ── Skill discovery ──
+discover_skills() {
+  local dir="$1"
+  find "$dir" -name "SKILL.md" -type f \
+    -not -path "*/.git/*" \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.skillpull.json" \
+    -exec dirname {} \; 2>/dev/null | sort -u
+}
+
+# ── SKILL.md → .mdc conversion (for Cursor) ──
+convert_skill_to_mdc() {
+  local skill_md="$1" output_file="$2"
+  local name desc body
+  name="$(parse_frontmatter "$skill_md" "name")"
+  desc="$(parse_frontmatter "$skill_md" "description")"
+
+  # Extract body (everything after the second ---)
+  body="$(awk 'BEGIN{n=0} /^---$/{n++;next} n>=2{print}' "$skill_md")" || true
+
+  # Write .mdc with Cursor frontmatter
+  {
+    echo "---"
+    echo "description: \"${desc}\""
+    echo "globs: "
+    echo "alwaysApply: false"
+    echo "---"
+    echo ""
+    [[ -n "$name" ]] && echo "# ${name}" && echo ""
+    echo "$body"
+  } > "$output_file"
+}
+
+resolve_target_dir() {
+  local agent="$1" is_global="$2" custom_path="$3"
+  if [[ -n "$custom_path" ]]; then
+    echo "$custom_path"
+    return
+  fi
+  if [[ "$is_global" == "1" ]]; then
+    local gdir="${AGENT_GLOBAL[$agent]:-}"
+    if [[ -z "$gdir" ]]; then
+      err "$agent does not support global rules (no file-based global path)"
+      return 1
+    fi
+    echo "$gdir"
+  else
+    echo "${AGENT_PROJECT[$agent]}"
+  fi
+}
+
+skill_display_name() {
+  local skill_dir="$1"
+  local name
+  name="$(parse_frontmatter "$skill_dir/SKILL.md" "name")"
+  [[ -z "$name" ]] && name="$(basename "$skill_dir")"
+  echo "$name"
+}
+
+# ── Manifest (.skillpull.json) ──
+read_manifest_entry() {
+  local manifest="$1" skill_name="$2" key="$3"
+  [[ ! -f "$manifest" ]] && { echo ""; return 0; }
+  local val
+  # Extract the line containing the skill, then pull out the key's value
+  val="$(grep "\"${skill_name}\"" "$manifest" 2>/dev/null | \
+    grep -o "\"${key}\":\"[^\"]*\"" | head -1 | \
+    sed "s/\"${key}\":\"//" | sed 's/"$//')" || true
+  echo "$val"
+}
+
+_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  echo "$s"
+}
+
+write_manifest_entry() {
+  local manifest="$1" skill_name="$2" repo="$3" branch="$4" commit="$5" version="$6"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local esc_repo; esc_repo="$(_json_escape "$repo")"
+  local entry
+  entry=$(printf '    "%s": {"repo":"%s","branch":"%s","commit":"%s","version":"%s","pulled_at":"%s"}' \
+    "$skill_name" "$esc_repo" "$branch" "$commit" "$version" "$ts")
+
+  if [[ ! -f "$manifest" ]]; then
+    printf '{\n  "skills": {\n%s\n  }\n}\n' "$entry" > "$manifest"
+    return
+  fi
+
+  # Remove old entry if exists, then append new one
+  local tmp; tmp="$(mktemp)"
+  if grep -q "\"${skill_name}\"" "$manifest" 2>/dev/null; then
+    # Replace existing entry
+    awk -v name="\"${skill_name}\"" -v new="$entry" '
+      $0 ~ name { found=1; print new; next }
+      found && /}/ { found=0; next }
+      found { next }
+      { print }
+    ' "$manifest" > "$tmp"
+    mv "$tmp" "$manifest"
+  else
+    # Append before closing braces
+    sed -i '/"skills":/,$ {
+      /^  }/ i\'"$entry"',
+    }' "$manifest"
+    # Fix trailing comma before closing brace
+    sed -i ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+  fi
+}
+
+# ── Clone helper ──
+clone_repo() {
+  local url="$1" branch="${2:-}" tmpdir="$3"
+  local cmd=(git clone --depth 1 --quiet)
+  [[ -n "$branch" ]] && cmd+=(--branch "$branch")
+  cmd+=("$url" "$tmpdir")
+  local output
+  if ! output=$("${cmd[@]}" 2>&1); then
+    err "Git clone failed: $url"
+    [[ -n "$output" ]] && err "$output"
+    return 1
+  fi
+}
+
+get_commit() {
+  local dir="$1"
+  git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "unknown"
+}
+
+get_branch() {
+  local dir="$1"
+  git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown"
+}
+
+# ── Commands ──
+
+cmd_pull() {
+  local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}"
+  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+  make_tmp
+  local tmpdir="$_TMPDIR"
+
+  dim "Cloning $repo_url ..."
+  clone_repo "$repo_url" "${BRANCH:-}" "$tmpdir" || return 1
+
+  local commit; commit="$(get_commit "$tmpdir")"
+  local branch; branch="$(get_branch "$tmpdir")"
+  local skills=()
+
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && skills+=("$d")
+  done < <(discover_skills "$tmpdir")
+
+  if [[ ${#skills[@]} -eq 0 ]]; then
+    err "No skills found in repository"
+    return 1
+  fi
+
+  # Filter by name if specified
+  if [[ -n "$skill_filter" ]]; then
+    local matched=()
+    for sd in "${skills[@]}"; do
+      local sn; sn="$(skill_display_name "$sd")"
+      local dn; dn="$(basename "$sd")"
+      if [[ "$sn" == "$skill_filter" || "$dn" == "$skill_filter" ]]; then
+        matched+=("$sd")
+      fi
+    done
+    if [[ ${#matched[@]} -eq 0 ]]; then
+      err "Skill '$skill_filter' not found. Available skills:"
+      for sd in "${skills[@]}"; do
+        local sn; sn="$(skill_display_name "$sd")"
+        printf "    - %s\n" "$sn" >&2
+      done
+      return 1
+    fi
+    skills=("${matched[@]}")
+  fi
+
+  mkdir -p "$target_dir"
+  local manifest="$target_dir/$MANIFEST_FILE"
+  local installed=0
+
+  for sd in "${skills[@]}"; do
+    local sn; sn="$(skill_display_name "$sd")"
+    local ver; ver="$(parse_frontmatter "$sd/SKILL.md" "version")"
+
+    if [[ "$fmt" == "mdc" ]]; then
+      # Cursor: convert SKILL.md → .mdc file
+      local dest="$target_dir/${sn}.mdc"
+
+      if [[ -f "$dest" && "$force" != "1" ]]; then
+        warn "Rule '$sn.mdc' already exists, use --force to overwrite"
+        continue
+      fi
+
+      if [[ "$dry_run" == "1" ]]; then
+        info "[dry-run] Would install: $sn -> $dest"
+        continue
+      fi
+
+      convert_skill_to_mdc "$sd/SKILL.md" "$dest"
+      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}"
+      info "Installed: $sn -> $dest (converted to .mdc)"
+    else
+      # Claude/Codex/Kiro: copy skill folder as-is
+      local dest="$target_dir/$sn"
+
+      if [[ -d "$dest" && "$force" != "1" ]]; then
+        local old_ver; old_ver="$(parse_frontmatter "$dest/SKILL.md" "version")"
+        warn "Skill '$sn' already exists (${old_ver:-unknown} -> ${ver:-unknown}), use --force to overwrite"
+        continue
+      fi
+
+      if [[ "$dry_run" == "1" ]]; then
+        info "[dry-run] Would install: $sn -> $dest"
+        continue
+      fi
+
+      rm -rf "$dest"
+      cp -r "$sd" "$dest"
+      rm -rf "$dest/.git"
+      if [[ -d "$dest/scripts" ]]; then
+        chmod +x "$dest/scripts/"* 2>/dev/null || true
+      fi
+
+      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}"
+      info "Installed: $sn${ver:+ (v$ver)} -> $dest"
+    fi
+    installed=$((installed + 1))
+  done
+
+  [[ "$dry_run" != "1" ]] && info "Done. $installed skill(s) installed to $target_dir"
+}
+
+cmd_list() {
+  local repo_url="$1"
+  make_tmp
+  local tmpdir="$_TMPDIR"
+
+  dim "Cloning $repo_url ..."
+  clone_repo "$repo_url" "${BRANCH:-}" "$tmpdir" || return 1
+
+  local skills=()
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && skills+=("$d")
+  done < <(discover_skills "$tmpdir")
+
+  if [[ ${#skills[@]} -eq 0 ]]; then
+    err "No skills found in repository"
+    return 1
+  fi
+
+  printf "\n  ${CYAN}%-25s %-10s %s${RESET}\n" "NAME" "VERSION" "DESCRIPTION"
+  printf "  %-25s %-10s %s\n" "─────────────────────────" "──────────" "────────────────────────────────"
+
+  for sd in "${skills[@]}"; do
+    local sn; sn="$(skill_display_name "$sd")"
+    local ver; ver="$(parse_frontmatter "$sd/SKILL.md" "version")"
+    local desc; desc="$(parse_frontmatter "$sd/SKILL.md" "description")"
+    # Truncate description
+    [[ ${#desc} -gt 50 ]] && desc="${desc:0:47}..."
+    printf "  %-25s %-10s %s\n" "$sn" "${ver:--}" "${desc:--}"
+  done
+  echo
+}
+
+cmd_installed() {
+  local target_dir="$1"
+  if [[ ! -d "$target_dir" ]]; then
+    warn "No skills directory found at $target_dir"
+    return 0
+  fi
+
+  local skills=()
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && skills+=("$d")
+  done < <(discover_skills "$target_dir")
+
+  if [[ ${#skills[@]} -eq 0 ]]; then
+    warn "No skills installed in $target_dir"
+    return 0
+  fi
+
+  local manifest="$target_dir/$MANIFEST_FILE"
+  printf "\n  ${CYAN}%-25s %-10s %-35s %s${RESET}\n" "NAME" "VERSION" "SOURCE" "PULLED"
+  printf "  %-25s %-10s %-35s %s\n" "─────────────────────────" "──────────" "───────────────────────────────────" "──────────────────"
+
+  for sd in "${skills[@]}"; do
+    local sn; sn="$(skill_display_name "$sd")"
+    local ver; ver="$(parse_frontmatter "$sd/SKILL.md" "version")"
+    local repo; repo="$(read_manifest_entry "$manifest" "$sn" "repo")"
+    local pulled; pulled="$(read_manifest_entry "$manifest" "$sn" "pulled_at")"
+    # Truncate repo URL
+    [[ ${#repo} -gt 33 ]] && repo="${repo:0:30}..."
+    printf "  %-25s %-10s %-35s %s\n" "$sn" "${ver:--}" "${repo:--}" "${pulled:--}"
+  done
+  echo
+}
+
+cmd_remove() {
+  local skill_name="$1" target_dir="$2" agent="${3:-claude}"
+  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+
+  if [[ "$fmt" == "mdc" ]]; then
+    local dest="$target_dir/${skill_name}.mdc"
+    if [[ ! -f "$dest" ]]; then
+      err "Rule '$skill_name.mdc' not found in $target_dir"
+      return 1
+    fi
+    rm -f "$dest"
+  else
+    local dest="$target_dir/$skill_name"
+    if [[ ! -d "$dest" ]]; then
+      local found=""
+      while IFS= read -r d; do
+        local sn; sn="$(skill_display_name "$d")"
+        if [[ "$sn" == "$skill_name" ]]; then
+          found="$d"; break
+        fi
+      done < <(discover_skills "$target_dir")
+
+      if [[ -z "$found" ]]; then
+        err "Skill '$skill_name' not found in $target_dir"
+        return 1
+      fi
+      dest="$found"
+    fi
+    rm -rf "$dest"
+  fi
+
+  # Clean up manifest entry
+  local manifest="$target_dir/$MANIFEST_FILE"
+  if [[ -f "$manifest" ]] && grep -q "\"${skill_name}\"" "$manifest" 2>/dev/null; then
+    local tmp; tmp="$(mktemp)"
+    grep -v "\"${skill_name}\"" "$manifest" > "$tmp" || true
+    mv "$tmp" "$manifest"
+    sed -i ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+  fi
+
+  info "Removed: $skill_name from $target_dir"
+}
+
+cmd_alias() {
+  local subcmd="${1:-list}" name="${2:-}" url="${3:-}"
+  case "$subcmd" in
+    add)
+      [[ -z "$name" || -z "$url" ]] && { err "Usage: skillpull alias add <name> <url>"; return 1; }
+      local resolved; resolved="$(resolve_repo_url "$url")" || return 1
+      write_alias "$name" "$resolved"
+      info "Alias '@$name' -> $resolved"
+      ;;
+    rm|remove)
+      [[ -z "$name" ]] && { err "Usage: skillpull alias rm <name>"; return 1; }
+      remove_alias "$name"
+      ;;
+    list|"")
+      list_aliases
+      ;;
+    *)
+      err "Unknown alias subcommand: $subcmd"
+      return 1
+      ;;
+  esac
+}
+
+cmd_search() {
+  local keyword="$1"
+  [[ -z "$keyword" ]] && { err "Usage: skillpull search <keyword>"; return 1; }
+
+  dim "Searching GitHub for '$keyword' ..."
+  local encoded; encoded="$(echo "$keyword" | sed 's/ /+/g')"
+  local api_url="https://api.github.com/search/repositories?q=${encoded}+skills+in:name,description,readme&sort=stars&per_page=15"
+  local result
+  result="$(curl -sS -H "Accept: application/vnd.github.v3+json" "$api_url" 2>/dev/null)" || {
+    err "GitHub API request failed"
+    return 1
+  }
+
+  local count
+  count="$(echo "$result" | grep '"total_count"' | head -1 | grep -o '[0-9]*')" || true
+
+  if [[ "${count:-0}" == "0" ]]; then
+    warn "No results found for '$keyword'"
+    return 0
+  fi
+
+  printf "\n  ${CYAN}%-30s %-8s %s${RESET}\n" "REPO" "STARS" "DESCRIPTION"
+  printf "  %-30s %-8s %s\n" "──────────────────────────────" "────────" "────────────────────────────────"
+
+  # Parse multi-line JSON with grep/sed
+  local names stars descs
+  names="$(echo "$result" | grep '"full_name"' | sed 's/.*"full_name": *"//;s/".*//' | head -15)"
+  stars="$(echo "$result" | grep '"stargazers_count"' | sed 's/.*"stargazers_count": *//;s/,.*//' | head -15)"
+  descs="$(echo "$result" | grep '"description"' | grep -v '"description": *null' | sed 's/.*"description": *"//;s/".*//' | head -15)"
+
+  paste <(echo "$names") <(echo "$stars") <(echo "$descs") | while IFS=$'\t' read -r n s d; do
+    [[ -z "$n" ]] && continue
+    [[ ${#d} -gt 40 ]] && d="${d:0:37}..."
+    printf "  %-30s %-8s %s\n" "$n" "${s:--}" "${d:--}"
+  done
+  echo
+  dim "Install with: skillpull <user/repo>"
+}
+
+# ── Usage ──
+usage() {
+  cat <<'HELP'
+skillpull — Sync AI agent skills from Git repositories
+
+USAGE:
+  skillpull <source> [skill-name] [options]
+  skillpull list <source>
+  skillpull search <keyword>
+  skillpull alias add <name> <url>
+  skillpull alias list
+  skillpull alias rm <name>
+  skillpull registry <repo-url>
+  skillpull installed [--global]
+  skillpull remove <skill-name> [--global]
+
+SOURCE FORMATS:
+  https://github.com/user/repo    Full URL (GitHub, GitLab, any Git host)
+  git@github.com:user/repo.git    SSH URL
+  user/repo                       GitHub shortname (auto-expands)
+  @myalias                        Alias (configured via 'alias add')
+
+TARGETS:
+  --claude              Claude Code (default): .claude/skills/
+  --codex               OpenAI Codex CLI: .codex/skills/
+  --kiro                Kiro: .kiro/skills/
+  --cursor              Cursor: .cursor/rules/ (auto-converts to .mdc)
+  --all                 Install to all supported targets at once
+
+OPTIONS:
+  --global, -g          Install to user-level directory
+  --path <dir>          Install to a custom directory
+  --branch <ref>        Use a specific branch/tag/commit
+  --force, -f           Overwrite existing skills
+  --dry-run             Preview without making changes
+  --quiet, -q           Suppress non-error output
+  --help, -h            Show this help
+  --version             Show version
+
+EXAMPLES:
+  skillpull tianhaocui/ai-skills                    # GitHub shortname
+  skillpull @work plan-first-development --global   # From alias
+  skillpull search coding-standards                 # Search GitHub
+  skillpull alias add work git@github.com:me/skills # Save alias
+  skillpull registry tianhaocui/ai-skills           # Set default source
+  skillpull tianhaocui/ai-skills --all              # All tools at once
+  skillpull tianhaocui/ai-skills --cursor           # Convert to .mdc
+HELP
+}
+
+# ── Argument parsing & dispatch ──
+main() {
+  local cmd="" repo_url="" skill_name="" custom_path=""
+  local force=0 dry_run=0 is_global=0 use_all=0
+  local agents=()
+  local alias_args=()
+  QUIET=0; BRANCH=""
+
+  [[ $# -eq 0 ]] && { usage; exit 0; }
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)    usage; exit 0;;
+      --version)    echo "skillpull $VERSION"; exit 0 ;;
+      --global|-g)  is_global=1; shift ;;
+      --path)       [[ $# -lt 2 ]] && { err "--path requires a directory"; exit 1; }; custom_path="$2"; shift 2 ;;
+      --branch)     [[ $# -lt 2 ]] && { err "--branch requires a ref"; exit 1; }; BRANCH="$2"; shift 2 ;;
+      --force|-f)   force=1; shift ;;
+      --dry-run)    dry_run=1; shift ;;
+      --quiet|-q)   QUIET=1; shift ;;
+      --claude)     agents+=("claude"); shift ;;
+      --codex)      agents+=("codex"); shift ;;
+      --kiro)       agents+=("kiro"); shift ;;
+      --cursor)     agents+=("cursor"); shift ;;
+      --all)        use_all=1; shift ;;
+      list)         cmd="list"; shift ;;
+      installed)    cmd="installed"; shift ;;
+      remove)       cmd="remove"; shift ;;
+      search)       cmd="search"; shift ;;
+      alias)        cmd="alias"; shift
+                    # Collect remaining args for alias subcommand
+                    while [[ $# -gt 0 ]]; do alias_args+=("$1"); shift; done
+                    ;;
+      registry)     cmd="registry"; shift ;;
+      -*)           err "Unknown option: $1"; usage; exit 1 ;;
+      *)
+        if [[ -z "$cmd" && -z "$repo_url" ]]; then
+          repo_url="$1"; cmd="pull"
+        elif [[ "$cmd" == "pull" && -n "$repo_url" && -z "$skill_name" ]]; then
+          skill_name="$1"
+        elif [[ "$cmd" == "list" && -z "$repo_url" ]]; then
+          repo_url="$1"
+        elif [[ "$cmd" == "remove" && -z "$skill_name" ]]; then
+          skill_name="$1"
+        elif [[ "$cmd" == "search" && -z "$skill_name" ]]; then
+          skill_name="$1"
+        elif [[ "$cmd" == "registry" && -z "$repo_url" ]]; then
+          repo_url="$1"
+        else
+          warn "Ignoring unexpected argument: $1"
+        fi
+        shift ;;
+    esac
+  done
+
+  # Default to claude if no agent specified
+  if [[ "$use_all" == "1" ]]; then
+    agents=("claude" "codex" "kiro" "cursor")
+  elif [[ ${#agents[@]} -eq 0 ]]; then
+    agents=("$DEFAULT_AGENT")
+  fi
+
+  case "${cmd:-}" in
+    pull|"")
+      [[ -z "$repo_url" ]] && { err "Missing source"; usage; exit 1; }
+      local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
+      # If resolve_repo_url returned registry URL for bare name, use original as skill filter
+      if [[ "$resolved" != "$repo_url" && "$repo_url" != @* && "$repo_url" != */* && "$repo_url" != *"://"* && "$repo_url" != git@* ]]; then
+        skill_name="$repo_url"
+      fi
+      for agent in "${agents[@]}"; do
+        local target_dir
+        target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
+        dim "Target: $agent -> $target_dir"
+        cmd_pull "$resolved" "$skill_name" "$target_dir" "$force" "$dry_run" "$agent"
+      done
+      ;;
+    list)
+      [[ -z "$repo_url" ]] && { err "Missing source"; usage; exit 1; }
+      local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
+      cmd_list "$resolved"
+      ;;
+    search)
+      cmd_search "${skill_name:-}"
+      ;;
+    alias)
+      cmd_alias "${alias_args[@]}"
+      ;;
+    registry)
+      if [[ -z "$repo_url" ]]; then
+        local current; current="$(read_config_key "registry")"
+        if [[ -n "$current" ]]; then
+          info "Current registry: $current"
+        else
+          warn "No default registry set. Usage: skillpull registry <user/repo>"
+        fi
+      else
+        local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
+        set_registry "$resolved"
+      fi
+      ;;
+    installed)
+      for agent in "${agents[@]}"; do
+        local target_dir
+        target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
+        dim "[$agent] $target_dir"
+        cmd_installed "$target_dir"
+      done
+      ;;
+    remove)
+      [[ -z "$skill_name" ]] && { err "Missing skill name"; usage; exit 1; }
+      for agent in "${agents[@]}"; do
+        local target_dir
+        target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
+        cmd_remove "$skill_name" "$target_dir" "$agent"
+      done
+      ;;
+    *)
+      err "Unknown command: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"
