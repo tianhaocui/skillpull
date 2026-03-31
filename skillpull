@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -669,35 +669,86 @@ cmd_push() {
   info "Done. $pushed skill(s) pushed to $resolved"
 }
 
+cmd_uninstall() {
+  local global_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
+
+  printf "\n  ${CYAN}Uninstall skillpull${RESET}\n\n"
+
+  # Remove binary
+  if [[ -f "$global_bin" ]]; then
+    rm -f "$global_bin"
+    info "Removed $global_bin"
+  else
+    dim "Binary not found at $global_bin"
+  fi
+
+  # Ask about config
+  if [[ -d "$CONFIG_DIR" ]]; then
+    printf "  Remove config (~/.config/skillpull)? (y/n) "
+    read -r yn
+    if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+      rm -rf "$CONFIG_DIR"
+      info "Removed $CONFIG_DIR"
+    else
+      dim "Config kept at $CONFIG_DIR"
+    fi
+  fi
+
+  # npm global
+  if command -v npm &>/dev/null && npm ls -g skillpull &>/dev/null 2>&1; then
+    printf "  Also run 'npm uninstall -g skillpull'? (y/n) "
+    read -r yn
+    if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+      npm uninstall -g skillpull
+      info "npm global package removed"
+    fi
+  fi
+
+  echo ""
+  info "skillpull uninstalled."
+}
+
 cmd_init() {
   ensure_config
   local current; current="$(read_config_key "registry")"
 
-  printf "\n  ${CYAN}skillpull init${RESET}\n\n"
+  printf "\n  ${CYAN}Welcome to skillpull!${RESET}\n\n"
+  printf "  Set a default skill repository so you can pull skills by name.\n\n"
+  printf "  ${DIM}Examples:${RESET}\n"
+  printf "  ${DIM}  tianhaocui/ai-skills                     GitHub shortname${RESET}\n"
+  printf "  ${DIM}  https://github.com/user/repo             Full URL${RESET}\n"
+  printf "  ${DIM}  git@github.com:user/repo.git             SSH URL${RESET}\n"
+  echo ""
 
   if [[ -n "$current" ]]; then
-    printf "  Current registry: ${GREEN}%s${RESET}\n\n" "$current"
-    printf "  Enter new skill repo (blank to keep current): "
+    printf "  Current: ${GREEN}%s${RESET}\n\n" "$current"
+    printf "  New skill repo (Enter to keep current): "
   else
-    printf "  ${DIM}Set a default skill repository so you can run 'skillpull <skill-name>' directly.${RESET}\n"
-    printf "  ${DIM}Supports: user/repo, full URL, or SSH.${RESET}\n\n"
     printf "  Skill repo: "
   fi
 
   read -r repo_input
 
-  if [[ -n "$repo_input" ]]; then
+  # Trim whitespace and control characters
+  repo_input="$(echo "$repo_input" | tr -d '[:cntrl:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  if [[ -z "$repo_input" ]]; then
+    if [[ -n "$current" ]]; then
+      dim "Keeping current registry: $current"
+    else
+      warn "No registry set. Run 'skillpull init' again when ready."
+      return 0
+    fi
+  else
     local resolved; resolved="$(resolve_repo_url "$repo_input")" || return 1
     set_registry "$resolved"
-  elif [[ -z "$current" ]]; then
-    warn "No registry set. Run 'skillpull init' again or 'skillpull registry <repo>'."
-    return 0
-  else
-    dim "Keeping current registry: $current"
   fi
 
   echo ""
-  info "You're all set. Try: skillpull list"
+  printf "  ${CYAN}What's next:${RESET}\n"
+  printf "    skillpull list              List available skills\n"
+  printf "    skillpull <skill-name>      Pull a skill into your project\n"
+  printf "    skillpull --help            See all commands\n"
   echo ""
 }
 
@@ -781,6 +832,7 @@ USAGE:
   skillpull push [target-repo] [options]
   skillpull installed [--global]
   skillpull remove <skill-name> [--global]
+  skillpull uninstall
 
 SOURCE FORMATS:
   https://github.com/user/repo    Full URL (GitHub, GitLab, any Git host)
@@ -827,7 +879,28 @@ main() {
   local alias_args=()
   QUIET=0; BRANCH=""
 
-  [[ $# -eq 0 ]] && { usage; exit 0; }
+  if [[ $# -eq 0 ]]; then
+    # If running via npx or not installed globally, offer to install
+    local self; self="$(realpath "$0" 2>/dev/null || echo "$0")"
+    local global_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
+
+    if [[ "$self" != "$global_bin" && ! -f "$global_bin" ]]; then
+      printf "\n  ${CYAN}Install skillpull globally?${RESET} (y/n) "
+      read -r yn
+      if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+        mkdir -p "$(dirname "$global_bin")"
+        cp "$self" "$global_bin"
+        chmod +x "$global_bin"
+        info "Installed to $global_bin"
+        if ! echo "$PATH" | tr ':' '\n' | grep -qx "$(dirname "$global_bin")"; then
+          warn "Add to PATH: export PATH=\"$(dirname "$global_bin"):\$PATH\""
+        fi
+      fi
+    fi
+
+    cmd_init
+    exit 0
+  fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -850,6 +923,7 @@ main() {
       update)       cmd="update"; shift ;;
       push)         cmd="push"; shift ;;
       init)         cmd="init"; shift ;;
+      uninstall)    cmd="uninstall"; shift ;;
       search)       cmd="search"; shift ;;
       alias)        cmd="alias"; shift
                     # Collect remaining args for alias subcommand
@@ -911,6 +985,9 @@ main() {
       ;;
     init)
       cmd_init
+      ;;
+    uninstall)
+      cmd_uninstall
       ;;
     alias)
       cmd_alias "${alias_args[@]}"
