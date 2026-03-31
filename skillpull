@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.3"
+VERSION="0.3.4"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -672,13 +672,17 @@ cmd_push() {
 cmd_uninstall() {
   local self; self="$(realpath "$0" 2>/dev/null || echo "$0")"
   local local_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
+  local removed=0
 
   printf "\n  ${CYAN}Uninstall skillpull${RESET}\n\n"
 
-  # Remove local binary if exists
+  # Remove local binary
   if [[ -f "$local_bin" ]]; then
     rm -f "$local_bin"
     info "Removed $local_bin"
+    removed=1
+  else
+    dim "No binary at $local_bin"
   fi
 
   # Remove config
@@ -688,9 +692,12 @@ cmd_uninstall() {
     if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
       rm -rf "$CONFIG_DIR"
       info "Removed $CONFIG_DIR"
+      removed=1
     else
       dim "Config kept at $CONFIG_DIR"
     fi
+  else
+    dim "No config directory found"
   fi
 
   # npm global uninstall
@@ -702,12 +709,19 @@ cmd_uninstall() {
       if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
         npm uninstall -g skillpull 2>/dev/null
         info "npm global package removed"
+        removed=1
       fi
+    else
+      dim "No npm global package found"
     fi
   fi
 
   echo ""
-  info "skillpull uninstalled."
+  if [[ "$removed" == "1" ]]; then
+    info "skillpull uninstalled."
+  else
+    warn "Nothing to uninstall."
+  fi
 }
 
 cmd_init() {
@@ -887,13 +901,16 @@ main() {
     local global_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
 
     if [[ "$self" != "$global_bin" && ! -f "$global_bin" ]]; then
+      info "Installing skillpull v${VERSION} ..."
       mkdir -p "$(dirname "$global_bin")"
       cp "$self" "$global_bin"
       chmod +x "$global_bin"
-      info "Installed skillpull to $global_bin"
+      info "Installed to $global_bin"
       if ! echo "$PATH" | tr ':' '\n' | grep -qx "$(dirname "$global_bin")"; then
         warn "Add to PATH: export PATH=\"$(dirname "$global_bin"):\$PATH\""
       fi
+      echo ""
+      info "Run 'skillpull init' to set up your default skill repo."
     else
       usage
     fi
