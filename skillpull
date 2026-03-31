@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.3"
+VERSION="0.4.4"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -476,28 +476,6 @@ cmd_pull() {
       done
       return 1
     fi
-    skills=("${matched[@]}")
-  elif [[ ${#skills[@]} -gt 1 && -t 0 ]]; then
-    # Multiple skills, no filter, interactive terminal -> let user choose
-    local names=()
-    for sd in "${skills[@]}"; do
-      names+=("$(skill_display_name "$sd")")
-    done
-    select_menu "Select skills to install:" "${names[@]}"
-    if [[ ${#SELECTED_ITEMS[@]} -eq 0 ]]; then
-      warn "No skills selected"
-      return 0
-    fi
-    local matched=()
-    for sd in "${skills[@]}"; do
-      local sn; sn="$(skill_display_name "$sd")"
-      for sel in "${SELECTED_ITEMS[@]}"; do
-        if [[ "$sn" == "$sel" ]]; then
-          matched+=("$sd")
-          break
-        fi
-      done
-    done
     skills=("${matched[@]}")
   fi
 
@@ -1051,7 +1029,7 @@ HELP
 # ── Argument parsing & dispatch ──
 main() {
   local cmd="" repo_url="" skill_name="" custom_path=""
-  local force=0 dry_run=0 is_global=0 use_all=0
+  local force=0 dry_run=0 is_global=0 use_all=0 agent_explicit=0
   local agents=()
   local alias_args=()
   QUIET=0; BRANCH=""
@@ -1089,11 +1067,11 @@ main() {
       --force|-f)   force=1; shift ;;
       --dry-run)    dry_run=1; shift ;;
       --quiet|-q)   QUIET=1; shift ;;
-      --claude)     agents+=("claude"); shift ;;
-      --codex)      agents+=("codex"); shift ;;
-      --kiro)       agents+=("kiro"); shift ;;
-      --cursor)     agents+=("cursor"); shift ;;
-      --all)        use_all=1; shift ;;
+      --claude)     agents+=("claude"); agent_explicit=1; shift ;;
+      --codex)      agents+=("codex"); agent_explicit=1; shift ;;
+      --kiro)       agents+=("kiro"); agent_explicit=1; shift ;;
+      --cursor)     agents+=("cursor"); agent_explicit=1; shift ;;
+      --all)        use_all=1; agent_explicit=1; shift ;;
       list)         cmd="list"; shift ;;
       installed)    cmd="installed"; shift ;;
       remove)       cmd="remove"; shift ;;
@@ -1134,7 +1112,20 @@ main() {
   if [[ "$use_all" == "1" ]]; then
     agents=("claude" "codex" "kiro" "cursor")
   elif [[ ${#agents[@]} -eq 0 ]]; then
-    agents=("$DEFAULT_AGENT")
+    if [[ "$agent_explicit" == "0" && -t 0 && "$cmd" != "installed" && "$cmd" != "update" ]]; then
+      # Interactive terminal, no agent flag -> let user choose
+      select_menu "Install to which tools?" "claude (.claude/skills)" "codex (.codex/skills)" "kiro (.kiro/skills)" "cursor (.cursor/rules)"
+      if [[ ${#SELECTED_ITEMS[@]} -eq 0 ]]; then
+        warn "No tools selected"
+        exit 0
+      fi
+      for sel in "${SELECTED_ITEMS[@]}"; do
+        local agent_name; agent_name="$(echo "$sel" | awk '{print $1}')"
+        agents+=("$agent_name")
+      done
+    else
+      agents=("$DEFAULT_AGENT")
+    fi
   fi
 
   case "${cmd:-}" in
