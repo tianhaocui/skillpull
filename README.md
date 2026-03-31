@@ -23,24 +23,22 @@ bash install.sh
 ## Quick Start
 
 ```bash
-# Interactive setup: configure default repo and project scope
+# 1. Setup global default skill repo
+skillpull init --global
+
+# 2. Setup project config in current directory
 skillpull init
 
-# Pull skills (uses registry if configured)
+# 3. Pull skills
 skillpull
-
-# Pull from a specific repo
-skillpull user/repo
-
-# Pull a specific skill
-skillpull user/repo my-skill
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `skillpull init` | Interactive setup: default repo + project scope |
+| `skillpull init --global` | Setup global default skill repo |
+| `skillpull init` | Setup project config (`.skillpullrc` in current dir) |
 | `skillpull <source> [skill]` | Pull skills from a Git repo |
 | `skillpull list [source]` | List available skills in a repo |
 | `skillpull search <keyword>` | Search GitHub for skill repos |
@@ -48,7 +46,7 @@ skillpull user/repo my-skill
 | `skillpull push [target-repo]` | Push local skills back to a remote repo |
 | `skillpull installed` | Show locally installed skills |
 | `skillpull remove <skill>` | Remove an installed skill |
-| `skillpull registry <repo>` | Set or view default skill repo |
+| `skillpull registry <repo>` | Set or view global default skill repo |
 | `skillpull alias add <name> <url>` | Save a repo shortcut |
 | `skillpull alias list` | List saved aliases |
 | `skillpull alias rm <name>` | Remove an alias |
@@ -99,10 +97,10 @@ skill-repo/
 
 The `skills/` folder at the repo root holds shared skills. Other folders are project-specific — only pulled when matching the configured project name.
 
-Configure a default project during `skillpull init`, or pass it per-command:
+Configure a default project in `.skillpullrc` via `skillpull init`, or pass it per-command:
 
 ```bash
-# Uses default project from config
+# Uses project from .skillpullrc
 skillpull
 
 # Override for a specific pull
@@ -136,10 +134,10 @@ skillpull push                  # uses registry if set
 
 | Flag | Description |
 |---|---|
-| `--global, -g` | Install to user-level directory |
+| `--global, -g` | Install to user-level directory / global init |
 | `--path <dir>` | Install to a custom directory |
 | `--branch <ref>` | Use a specific branch/tag/commit |
-| `--project <name>` | Include project-specific skills (defaults to `init` config) |
+| `--project <name>` | Include project-specific skills (defaults to `.skillpullrc`) |
 | `--force, -f` | Overwrite existing skills |
 | `--dry-run` | Preview without making changes |
 | `--quiet, -q` | Suppress non-error output |
@@ -168,15 +166,27 @@ Skill content here...
 
 ## Config
 
-Config is stored at `~/.config/skillpull/config.json`:
+Two-tier configuration: global + per-project.
+
+Global (`~/.config/skillpull/config.json`):
 
 ```json
 {
   "aliases": {},
-  "registry": "https://github.com/user/repo",
+  "registry": "https://github.com/user/repo"
+}
+```
+
+Project (`.skillpullrc` in project root):
+
+```json
+{
+  "registry": "https://github.com/team/project-skills",
   "project": "my-app"
 }
 ```
+
+Priority: `--project` CLI flag > `.skillpullrc` > global config.
 
 Installed skills are tracked per-directory in `.skillpull.json` manifests.
 

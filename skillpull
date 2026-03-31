@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.8"
+VERSION="0.5.0"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -166,10 +166,11 @@ make_tmp() { _TMPDIR="$(mktemp -d "/tmp/${TMPDIR_PREFIX}.XXXXXX")"; }
 # ── Config helpers ──
 ensure_config() {
   mkdir -p "$CONFIG_DIR"
-  [[ -f "$CONFIG_FILE" ]] || echo '{"aliases":{},"registry":"","project":""}' > "$CONFIG_FILE"
-  # Migrate: add "project" key if missing
-  if ! grep -q '"project"' "$CONFIG_FILE" 2>/dev/null; then
-    sedi 's/}$/,"project":""}/' "$CONFIG_FILE"
+  [[ -f "$CONFIG_FILE" ]] || echo '{"aliases":{},"registry":""}' > "$CONFIG_FILE"
+  # Migrate: remove "project" key from global config (moved to .skillpullrc)
+  if grep -q '"project"' "$CONFIG_FILE" 2>/dev/null; then
+    sedi 's/,"project":"[^"]*"//g' "$CONFIG_FILE"
+    sedi 's/"project":"[^"]*",//g' "$CONFIG_FILE"
   fi
 }
 
@@ -250,16 +251,41 @@ set_registry() {
   info "Default registry set to: $url"
 }
 
-set_project() {
-  local name="$1"
-  ensure_config
-  local esc_name; esc_name="$(_json_escape "$name")"
-  sedi "s|\"project\":\"[^\"]*\"|\"project\":\"${esc_name}\"|" "$CONFIG_FILE"
-  if [[ -n "$name" ]]; then
-    info "Default project set to: $name"
-  else
-    info "Default project cleared"
+# ── Project-level config (.skillpullrc) ──
+PROJECT_RC=".skillpullrc"
+
+read_project_rc() {
+  local key="$1"
+  [[ ! -f "$PROJECT_RC" ]] && { echo ""; return 0; }
+  local val
+  val="$(grep -o "\"${key}\":\"[^\"]*\"" "$PROJECT_RC" 2>/dev/null | head -1 | \
+    sed "s/\"${key}\":\"//" | sed 's/"$//')" || true
+  echo "$val"
+}
+
+write_project_rc() {
+  local project="$1" registry="${2:-}"
+  local esc_project; esc_project="$(_json_escape "$project")"
+  local esc_registry; esc_registry="$(_json_escape "$registry")"
+  echo "{\"registry\":\"${esc_registry}\",\"project\":\"${esc_project}\"}" > "$PROJECT_RC"
+}
+
+# Resolve a config value: CLI > .skillpullrc > global config
+resolve_config() {
+  local key="$1" cli_value="${2:-}"
+  # CLI flag takes priority
+  if [[ -n "$cli_value" ]]; then
+    echo "$cli_value"
+    return 0
   fi
+  # Project-level .skillpullrc
+  local rc_val; rc_val="$(read_project_rc "$key")"
+  if [[ -n "$rc_val" ]]; then
+    echo "$rc_val"
+    return 0
+  fi
+  # Global config
+  read_config_key "$key"
 }
 
 # ── URL resolution ──
@@ -292,7 +318,7 @@ resolve_repo_url() {
   fi
 
   # Bare name -> try registry
-  local registry; registry="$(read_config_key "registry")"
+  local registry; registry="$(resolve_config "registry")"
   if [[ -n "$registry" ]]; then
     # Treat registry as a repo URL, skill name as filter
     echo "$registry"
@@ -813,7 +839,7 @@ cmd_push() {
 
   # Resolve push target repo
   if [[ -z "$repo_url" ]]; then
-    repo_url="$(read_config_key "registry")"
+    repo_url="$(resolve_config "registry")"
     if [[ -z "$repo_url" ]]; then
       err "No target repo specified and no registry set."
       err "Usage: skillpull push <user/repo> or set registry first."
@@ -943,11 +969,11 @@ cmd_uninstall() {
   fi
 }
 
-cmd_init() {
+cmd_init_global() {
   ensure_config
   local current; current="$(read_config_key "registry")"
 
-  printf "\n  ${CYAN}Welcome to skillpull!${RESET}\n\n"
+  printf "\n  ${CYAN}Global setup${RESET}\n\n"
   printf "  Set a default skill repository so you can pull skills by name.\n\n"
   printf "  ${DIM}Examples:${RESET}\n"
   printf "  ${DIM}  tianhaocui/ai-skills                     GitHub shortname${RESET}\n"
@@ -971,7 +997,7 @@ cmd_init() {
     if [[ -n "$current" ]]; then
       dim "Keeping current registry: $current"
     else
-      warn "No registry set. Run 'skillpull init' again when ready."
+      warn "No registry set. Run 'skillpull init --global' again when ready."
       return 0
     fi
   else
@@ -979,32 +1005,79 @@ cmd_init() {
     set_registry "$resolved"
   fi
 
-  # ── Project scope ──
-  local current_project; current_project="$(read_config_key "project")"
   echo ""
-  printf "  ${CYAN}Project scope${RESET} ${DIM}(optional)${RESET}\n"
-  printf "  ${DIM}If your skill repo has project-specific subfolders, set a default here.${RESET}\n"
-  printf "  ${DIM}Skills from both root level and the project subfolder will be pulled.${RESET}\n\n"
+  printf "  ${CYAN}What's next:${RESET}\n"
+  printf "    skillpull init              Setup project config (.skillpullrc)\n"
+  printf "    skillpull list              List available skills\n"
+  printf "    skillpull --help            See all commands\n"
+  echo ""
+}
+
+cmd_init_project() {
+  # Read existing .skillpullrc if present
+  local current_project; current_project="$(read_project_rc "project")"
+  local current_registry; current_registry="$(read_project_rc "registry")"
+
+  printf "\n  ${CYAN}Project setup${RESET} ${DIM}(%s)${RESET}\n\n" "$PWD"
+
+  # ── Project name ──
+  printf "  ${DIM}Set the project name to match a subfolder in your skill repo.${RESET}\n"
+  printf "  ${DIM}Skills from both skills/ (common) and the project subfolder will be pulled.${RESET}\n\n"
 
   if [[ -n "$current_project" ]]; then
     printf "  Current: ${GREEN}%s${RESET}\n\n" "$current_project"
     printf "  Project name (Enter to keep, 'none' to clear): "
   else
-    printf "  Project name (Enter to skip): "
+    printf "  Project name: "
   fi
 
   read -r project_input
   project_input="$(echo "$project_input" | tr -d '[:cntrl:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
-  if [[ -z "$project_input" ]]; then
-    if [[ -n "$current_project" ]]; then
-      dim "Keeping current project: $current_project"
+  local new_project="$current_project"
+  if [[ -n "$project_input" ]]; then
+    if [[ "$project_input" == "none" ]]; then
+      new_project=""
+    else
+      new_project="$project_input"
     fi
-  elif [[ "$project_input" == "none" ]]; then
-    set_project ""
-  else
-    set_project "$project_input"
   fi
+
+  # ── Optional registry override ──
+  echo ""
+  printf "  ${DIM}Optional: override the global skill repo for this project.${RESET}\n"
+  printf "  ${DIM}Leave empty to use the global registry.${RESET}\n\n"
+
+  if [[ -n "$current_registry" ]]; then
+    printf "  Current: ${GREEN}%s${RESET}\n\n" "$current_registry"
+    printf "  Skill repo override (Enter to keep, 'none' to clear): "
+  else
+    printf "  Skill repo override (Enter to skip): "
+  fi
+
+  read -r registry_input
+  registry_input="$(echo "$registry_input" | tr -d '[:cntrl:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  local new_registry="$current_registry"
+  if [[ -n "$registry_input" ]]; then
+    if [[ "$registry_input" == "none" ]]; then
+      new_registry=""
+    else
+      local resolved; resolved="$(resolve_repo_url "$registry_input")" || return 1
+      new_registry="$resolved"
+    fi
+  fi
+
+  write_project_rc "$new_project" "$new_registry"
+
+  echo ""
+  if [[ -n "$new_project" ]]; then
+    info "Project: $new_project"
+  fi
+  if [[ -n "$new_registry" ]]; then
+    info "Registry override: $new_registry"
+  fi
+  info "Saved to $PROJECT_RC"
 
   echo ""
   printf "  ${CYAN}What's next:${RESET}\n"
@@ -1086,6 +1159,7 @@ usage() {
 skillpull — Sync AI agent skills from Git repositories
 
 USAGE:
+  skillpull init --global
   skillpull init
   skillpull <source> [skill-name] [options]
   skillpull list <source>
@@ -1114,29 +1188,36 @@ TARGETS:
   --all                 Install to all supported targets at once
 
 OPTIONS:
-  --global, -g          Install to user-level directory
+  --global, -g          Install to user-level directory / global init
   --path <dir>          Install to a custom directory
   --branch <ref>        Use a specific branch/tag/commit
   --project <name>      Include project-specific skills from <name>/ subfolder
-                        (defaults to value set in 'skillpull init')
+                        (defaults to value in .skillpullrc)
   --force, -f           Overwrite existing skills
   --dry-run             Preview without making changes
   --quiet, -q           Suppress non-error output
   --help, -h            Show this help
   --version             Show version
 
+CONFIG:
+  Global:   ~/.config/skillpull/config.json   (registry, aliases)
+  Project:  .skillpullrc                      (project name, optional registry override)
+
+  Resolution order: CLI flags > .skillpullrc > global config
+
 EXAMPLES:
-  skillpull init                                    # Setup default skill repo & project
-  skillpull tianhaocui/ai-skills                    # GitHub shortname
-  skillpull @work plan-first-development --global   # From alias
-  skillpull search coding-standards                 # Search GitHub
-  skillpull alias add work git@github.com:me/skills # Save alias
-  skillpull registry tianhaocui/ai-skills           # Set default source
-  skillpull tianhaocui/ai-skills --all              # All tools at once
-  skillpull tianhaocui/ai-skills --cursor           # Convert to .mdc
-  skillpull update                                  # Update all installed skills
-  skillpull push tianhaocui/ai-skills               # Push local skills to remote
-  skillpull user/repo --project my-app              # Common + project-specific skills
+  skillpull init --global                            # Setup default skill repo
+  skillpull init                                     # Setup project config (.skillpullrc)
+  skillpull tianhaocui/ai-skills                     # GitHub shortname
+  skillpull @work plan-first-development --global    # From alias
+  skillpull search coding-standards                  # Search GitHub
+  skillpull alias add work git@github.com:me/skills  # Save alias
+  skillpull registry tianhaocui/ai-skills            # Set default source
+  skillpull tianhaocui/ai-skills --all               # All tools at once
+  skillpull tianhaocui/ai-skills --cursor            # Convert to .mdc
+  skillpull update                                   # Update all installed skills
+  skillpull push tianhaocui/ai-skills                # Push local skills to remote
+  skillpull user/repo --project my-app               # Common + project-specific skills
 HELP
 }
 
@@ -1163,7 +1244,7 @@ main() {
         warn "Add to PATH: export PATH=\"$(dirname "$global_bin"):\$PATH\""
       fi
       echo ""
-      info "Run 'skillpull init' to set up your default skill repo."
+      info "Run 'skillpull init --global' to set up your default skill repo."
       exit 0
     fi
 
@@ -1245,16 +1326,16 @@ main() {
 
   case "${cmd:-}" in
     pull|"")
-      # Fall back to configured project if --project not specified
+      # Resolve project: CLI > .skillpullrc > (none)
       if [[ -z "$project_name" ]]; then
-        project_name="$(read_config_key "project")"
+        project_name="$(read_project_rc "project")"
       fi
       if [[ -z "$repo_url" ]]; then
-        # No source given, try registry
-        local reg; reg="$(read_config_key "registry")"
+        # Resolve registry: .skillpullrc > global config
+        local reg; reg="$(resolve_config "registry")"
         if [[ -z "$reg" ]]; then
           err "No source specified and no registry set."
-          err "Run 'skillpull init' to set a default skill repo."
+          err "Run 'skillpull init --global' to set a default skill repo."
           exit 1
         fi
         repo_url="$reg"
@@ -1272,15 +1353,15 @@ main() {
       done
       ;;
     list)
-      # Fall back to configured project if --project not specified
+      # Resolve project: CLI > .skillpullrc > (none)
       if [[ -z "$project_name" ]]; then
-        project_name="$(read_config_key "project")"
+        project_name="$(read_project_rc "project")"
       fi
       if [[ -z "$repo_url" ]]; then
-        local reg; reg="$(read_config_key "registry")"
+        local reg; reg="$(resolve_config "registry")"
         if [[ -z "$reg" ]]; then
           err "No source specified and no registry set."
-          err "Run 'skillpull init' to set a default skill repo."
+          err "Run 'skillpull init --global' to set a default skill repo."
           exit 1
         fi
         repo_url="$reg"
@@ -1292,7 +1373,11 @@ main() {
       cmd_search "${skill_name:-}"
       ;;
     init)
-      cmd_init
+      if [[ "$is_global" == "1" ]]; then
+        cmd_init_global
+      else
+        cmd_init_project
+      fi
       ;;
     uninstall)
       cmd_uninstall
