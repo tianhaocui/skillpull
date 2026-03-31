@@ -528,6 +528,142 @@ cmd_remove() {
   info "Removed: $skill_name from $target_dir"
 }
 
+cmd_update() {
+  local target_dir="$1" force="$2" agent="$3"
+  local manifest="$target_dir/$MANIFEST_FILE"
+
+  if [[ ! -f "$manifest" ]]; then
+    err "No manifest found at $target_dir. Nothing to update."
+    return 1
+  fi
+
+  # Collect unique repos from manifest
+  local repos=()
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] && repos+=("$repo")
+  done < <(grep -oP '"repo":"[^"]*"' "$manifest" | sed 's/"repo":"//;s/"$//' | sort -u)
+
+  if [[ ${#repos[@]} -eq 0 ]]; then
+    warn "No skills tracked in manifest"
+    return 0
+  fi
+
+  local updated=0
+  for repo_url in "${repos[@]}"; do
+    # Find all skills from this repo
+    local skill_names=()
+    while IFS= read -r sn; do
+      [[ -n "$sn" ]] && skill_names+=("$sn")
+    done < <(grep -B1 "\"repo\":\"${repo_url}\"" "$manifest" | grep -oP '^\s*"[^"]+":' | sed 's/[" :]//g')
+
+    dim "Updating from $repo_url ..."
+    for sn in "${skill_names[@]}"; do
+      local old_commit; old_commit="$(read_manifest_entry "$manifest" "$sn" "commit")"
+      cmd_pull "$repo_url" "$sn" "$target_dir" "1" "0" "$agent" 2>/dev/null && {
+        local new_commit; new_commit="$(read_manifest_entry "$manifest" "$sn" "commit")"
+        if [[ "$old_commit" != "$new_commit" ]]; then
+          info "Updated: $sn ($old_commit -> $new_commit)"
+          updated=$((updated + 1))
+        else
+          dim "Already up to date: $sn"
+        fi
+      }
+    done
+  done
+
+  info "Done. $updated skill(s) updated."
+}
+
+cmd_push() {
+  local target_dir="$1" repo_url="$2" agent="$3"
+  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    err "No skills directory found at $target_dir"
+    return 1
+  fi
+
+  # Resolve push target repo
+  if [[ -z "$repo_url" ]]; then
+    repo_url="$(read_config_key "registry")"
+    if [[ -z "$repo_url" ]]; then
+      err "No target repo specified and no registry set."
+      err "Usage: skillpull push <user/repo> or set registry first."
+      return 1
+    fi
+  fi
+
+  local resolved; resolved="$(resolve_repo_url "$repo_url")" || return 1
+
+  # Clone the remote repo
+  make_tmp
+  local tmpdir="$_TMPDIR"
+  dim "Cloning $resolved ..."
+
+  # Try clone; if empty repo, init fresh
+  if ! clone_repo "$resolved" "${BRANCH:-}" "$tmpdir" 2>/dev/null; then
+    git init --quiet "$tmpdir"
+    git -C "$tmpdir" remote add origin "$resolved"
+  fi
+
+  local branch; branch="$(git -C "$tmpdir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")"
+
+  # Discover local skills
+  local skills=()
+  if [[ "$fmt" == "mdc" ]]; then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && skills+=("$f")
+    done < <(find "$target_dir" -name "*.mdc" -type f 2>/dev/null)
+  else
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && skills+=("$d")
+    done < <(discover_skills "$target_dir")
+  fi
+
+  if [[ ${#skills[@]} -eq 0 ]]; then
+    err "No skills found in $target_dir"
+    return 1
+  fi
+
+  # Copy skills into the cloned repo
+  local pushed=0
+  local skills_subdir="$tmpdir/skills"
+  mkdir -p "$skills_subdir"
+
+  for sd in "${skills[@]}"; do
+    local sn
+    if [[ "$fmt" == "mdc" ]]; then
+      sn="$(basename "$sd" .mdc)"
+    else
+      sn="$(skill_display_name "$sd")"
+    fi
+
+    local dest="$skills_subdir/$sn"
+    rm -rf "$dest"
+    cp -r "$sd" "$dest"
+    rm -rf "$dest/.git"
+    info "Staged: $sn"
+    pushed=$((pushed + 1))
+  done
+
+  # Commit and push
+  git -C "$tmpdir" add -A
+  if git -C "$tmpdir" diff --cached --quiet 2>/dev/null; then
+    dim "No changes to push. Remote is already up to date."
+    return 0
+  fi
+
+  git -C "$tmpdir" commit --quiet -m "skillpull push: $pushed skill(s) updated"
+  dim "Pushing to $resolved ..."
+
+  if ! git -C "$tmpdir" push origin "$branch" 2>&1; then
+    err "Push failed. Check your permissions for $resolved"
+    return 1
+  fi
+
+  info "Done. $pushed skill(s) pushed to $resolved"
+}
+
 cmd_alias() {
   local subcmd="${1:-list}" name="${2:-}" url="${3:-}"
   case "$subcmd" in
@@ -603,6 +739,8 @@ USAGE:
   skillpull alias list
   skillpull alias rm <name>
   skillpull registry <repo-url>
+  skillpull update [options]
+  skillpull push [target-repo] [options]
   skillpull installed [--global]
   skillpull remove <skill-name> [--global]
 
@@ -637,6 +775,8 @@ EXAMPLES:
   skillpull registry tianhaocui/ai-skills           # Set default source
   skillpull tianhaocui/ai-skills --all              # All tools at once
   skillpull tianhaocui/ai-skills --cursor           # Convert to .mdc
+  skillpull update                                  # Update all installed skills
+  skillpull push tianhaocui/ai-skills               # Push local skills to remote
 HELP
 }
 
@@ -668,6 +808,8 @@ main() {
       list)         cmd="list"; shift ;;
       installed)    cmd="installed"; shift ;;
       remove)       cmd="remove"; shift ;;
+      update)       cmd="update"; shift ;;
+      push)         cmd="push"; shift ;;
       search)       cmd="search"; shift ;;
       alias)        cmd="alias"; shift
                     # Collect remaining args for alias subcommand
@@ -687,6 +829,8 @@ main() {
         elif [[ "$cmd" == "search" && -z "$skill_name" ]]; then
           skill_name="$1"
         elif [[ "$cmd" == "registry" && -z "$repo_url" ]]; then
+          repo_url="$1"
+        elif [[ "$cmd" == "push" && -z "$repo_url" ]]; then
           repo_url="$1"
         else
           warn "Ignoring unexpected argument: $1"
@@ -755,6 +899,21 @@ main() {
         local target_dir
         target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
         cmd_remove "$skill_name" "$target_dir" "$agent"
+      done
+      ;;
+    update)
+      for agent in "${agents[@]}"; do
+        local target_dir
+        target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
+        dim "[$agent] $target_dir"
+        cmd_update "$target_dir" "$force" "$agent"
+      done
+      ;;
+    push)
+      for agent in "${agents[@]}"; do
+        local target_dir
+        target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
+        cmd_push "$target_dir" "$repo_url" "$agent"
       done
       ;;
     *)
