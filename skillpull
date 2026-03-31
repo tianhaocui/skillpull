@@ -1,34 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
-# ── Agent targets ──
-# Format: PROJECT_DIR|GLOBAL_DIR|FORMAT
-# FORMAT: skill = SKILL.md folder, mdc = .cursor/rules/*.mdc
-declare -A AGENT_PROJECT AGENT_GLOBAL AGENT_FORMAT
-AGENT_PROJECT=(
-  [claude]=".claude/skills"
-  [codex]=".codex/skills"
-  [kiro]=".kiro/skills"
-  [cursor]=".cursor/rules"
-)
-AGENT_GLOBAL=(
-  [claude]="$HOME/.claude/skills"
-  [codex]="$HOME/.codex/skills"
-  [kiro]="$HOME/.kiro/skills"
-  [cursor]=""  # Cursor has no global file-based rules
-)
-AGENT_FORMAT=(
-  [claude]="skill"
-  [codex]="skill"
-  [kiro]="skill"
-  [cursor]="mdc"
-)
+# ── Agent targets (bash 3 compatible) ──
+agent_project() {
+  case "$1" in
+    claude) echo ".claude/skills" ;;
+    codex)  echo ".codex/skills" ;;
+    kiro)   echo ".kiro/skills" ;;
+    cursor) echo ".cursor/rules" ;;
+  esac
+}
+
+agent_global() {
+  case "$1" in
+    claude) echo "$HOME/.claude/skills" ;;
+    codex)  echo "$HOME/.codex/skills" ;;
+    kiro)   echo "$HOME/.kiro/skills" ;;
+    cursor) echo "" ;;
+  esac
+}
+
+agent_format() {
+  case "$1" in
+    claude) echo "skill" ;;
+    codex)  echo "skill" ;;
+    kiro)   echo "skill" ;;
+    cursor) echo "mdc" ;;
+  esac
+}
 
 DEFAULT_AGENT="claude"
 
@@ -223,14 +228,14 @@ resolve_target_dir() {
     return
   fi
   if [[ "$is_global" == "1" ]]; then
-    local gdir="${AGENT_GLOBAL[$agent]:-}"
+    local gdir; gdir="$(agent_global "$agent")"
     if [[ -z "$gdir" ]]; then
       err "$agent does not support global rules (no file-based global path)"
       return 1
     fi
     echo "$gdir"
   else
-    echo "${AGENT_PROJECT[$agent]}"
+    echo "$(agent_project "$agent")"
   fi
 }
 
@@ -323,7 +328,7 @@ get_branch() {
 
 cmd_pull() {
   local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}"
-  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+  local fmt; fmt="$(agent_format "$agent")"
   make_tmp
   local tmpdir="$_TMPDIR"
 
@@ -487,7 +492,7 @@ cmd_installed() {
 
 cmd_remove() {
   local skill_name="$1" target_dir="$2" agent="${3:-claude}"
-  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+  local fmt; fmt="$(agent_format "$agent")"
 
   if [[ "$fmt" == "mdc" ]]; then
     local dest="$target_dir/${skill_name}.mdc"
@@ -576,7 +581,7 @@ cmd_update() {
 
 cmd_push() {
   local target_dir="$1" repo_url="$2" agent="$3"
-  local fmt="${AGENT_FORMAT[$agent]:-skill}"
+  local fmt; fmt="$(agent_format "$agent")"
 
   if [[ ! -d "$target_dir" ]]; then
     err "No skills directory found at $target_dir"
