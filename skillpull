@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.6"
+VERSION="0.3.7"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -46,6 +46,15 @@ warn()  { printf "  ${YELLOW}!${RESET} %s\n" "$*" >&2; }
 err()   { printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 dim()   { [[ "${QUIET:-0}" == "1" ]] || printf "  ${DIM}%s${RESET}\n" "$*"; }
 
+# ── Cross-platform sed -i ──
+sedi() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
 # ── Cleanup ──
 _TMPDIR=""
 cleanup() { [[ -n "${_TMPDIR:-}" && -d "${_TMPDIR:-}" ]] && rm -rf "$_TMPDIR" || true; }
@@ -83,12 +92,12 @@ write_alias() {
   ensure_config
   local esc_url; esc_url="$(_json_escape "$url")"
   if grep -q "\"${name}\"" "$CONFIG_FILE" 2>/dev/null; then
-    sed -i "s|\"${name}\":\"[^\"]*\"|\"${name}\":\"${esc_url}\"|" "$CONFIG_FILE"
+    sedi "s|\"${name}\":\"[^\"]*\"|\"${name}\":\"${esc_url}\"|" "$CONFIG_FILE"
   else
     # Insert into aliases object
-    sed -i "s|\"aliases\":{|\"aliases\":{\"${name}\":\"${esc_url}\",|" "$CONFIG_FILE"
+    sedi "s|\"aliases\":{|\"aliases\":{\"${name}\":\"${esc_url}\",|" "$CONFIG_FILE"
     # Clean trailing comma before }
-    sed -i 's/,}/}/g' "$CONFIG_FILE"
+    sedi 's/,}/}/g' "$CONFIG_FILE"
   fi
 }
 
@@ -100,9 +109,9 @@ remove_alias() {
     return 1
   fi
   # Remove the alias entry
-  sed -i "s|\"${name}\":\"[^\"]*\",\?||" "$CONFIG_FILE"
+  sedi "s|\"${name}\":\"[^\"]*\",\?||" "$CONFIG_FILE"
   # Clean up double commas and trailing commas
-  sed -i 's/,,/,/g; s/,}/}/g; s/{,/{/g' "$CONFIG_FILE"
+  sedi 's/,,/,/g; s/,}/}/g; s/{,/{/g' "$CONFIG_FILE"
   info "Alias '$name' removed"
 }
 
@@ -131,7 +140,7 @@ set_registry() {
   local url="$1"
   ensure_config
   local esc_url; esc_url="$(_json_escape "$url")"
-  sed -i "s|\"registry\":\"[^\"]*\"|\"registry\":\"${esc_url}\"|" "$CONFIG_FILE"
+  sedi "s|\"registry\":\"[^\"]*\"|\"registry\":\"${esc_url}\"|" "$CONFIG_FILE"
   info "Default registry set to: $url"
 }
 
@@ -292,11 +301,11 @@ write_manifest_entry() {
     mv "$tmp" "$manifest"
   else
     # Append before closing braces
-    sed -i '/"skills":/,$ {
+    sedi '/"skills":/,$ {
       /^  }/ i\'"$entry"',
     }' "$manifest"
     # Fix trailing comma before closing brace
-    sed -i ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+    sedi ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
   fi
 }
 
@@ -527,7 +536,7 @@ cmd_remove() {
     local tmp; tmp="$(mktemp)"
     grep -v "\"${skill_name}\"" "$manifest" > "$tmp" || true
     mv "$tmp" "$manifest"
-    sed -i ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+    sedi ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
   fi
 
   info "Removed: $skill_name from $target_dir"
