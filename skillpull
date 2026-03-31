@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.1"
+VERSION="0.5.2"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -445,12 +445,12 @@ _json_escape() {
 }
 
 write_manifest_entry() {
-  local manifest="$1" skill_name="$2" repo="$3" branch="$4" commit="$5" version="$6"
+  local manifest="$1" skill_name="$2" repo="$3" branch="$4" commit="$5" version="$6" scope="${7:-common}"
   local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local esc_repo; esc_repo="$(_json_escape "$repo")"
   local entry
-  entry=$(printf '    "%s": {"repo":"%s","branch":"%s","commit":"%s","version":"%s","pulled_at":"%s"}' \
-    "$skill_name" "$esc_repo" "$branch" "$commit" "$version" "$ts")
+  entry=$(printf '    "%s": {"repo":"%s","branch":"%s","commit":"%s","version":"%s","scope":"%s","pulled_at":"%s"}' \
+    "$skill_name" "$esc_repo" "$branch" "$commit" "$version" "$scope" "$ts")
 
   if [[ ! -f "$manifest" ]]; then
     printf '{\n  "skills": {\n%s\n  }\n}\n' "$entry" > "$manifest"
@@ -577,6 +577,14 @@ cmd_pull() {
     local sn; sn="$(skill_display_name "$sd")"
     local ver; ver="$(parse_frontmatter "$sd/SKILL.md" "version")"
 
+    # Determine scope: common (skills/) or project-specific
+    local scope="common"
+    if [[ -n "$project" ]]; then
+      case "$sd" in
+        "$tmpdir/$project/"*) scope="$project" ;;
+      esac
+    fi
+
     if [[ "$fmt" == "mdc" ]]; then
       # Cursor: convert SKILL.md → .mdc file
       local dest="$target_dir/${sn}.mdc"
@@ -592,7 +600,7 @@ cmd_pull() {
       fi
 
       convert_skill_to_mdc "$sd/SKILL.md" "$dest"
-      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}"
+      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}" "$scope"
       info "Installed: $sn -> $dest (converted to .mdc)"
     else
       # Claude/Codex/Kiro: copy skill folder as-is
@@ -616,7 +624,7 @@ cmd_pull() {
         chmod +x "$dest/scripts/"* 2>/dev/null || true
       fi
 
-      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}"
+      write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}" "$scope"
       info "Installed: $sn${ver:+ (v$ver)} -> $dest"
     fi
     installed=$((installed + 1))
@@ -862,7 +870,11 @@ cmd_push() {
 
   local branch; branch="$(git -C "$tmpdir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")"
 
+  # Read project name from .skillpullrc
+  local project_name; project_name="$(read_project_rc "project")"
+
   # Discover local skills
+  local manifest="$target_dir/$MANIFEST_FILE"
   local skills=()
   if [[ "$fmt" == "mdc" ]]; then
     while IFS= read -r f; do
@@ -879,10 +891,10 @@ cmd_push() {
     return 1
   fi
 
-  # Copy skills into the cloned repo
+  # Classify skills by scope
   local pushed=0
-  local skills_subdir="$tmpdir/skills"
-  mkdir -p "$skills_subdir"
+  local untracked_names=()
+  local untracked_dirs=()
 
   for sd in "${skills[@]}"; do
     local sn
@@ -892,13 +904,78 @@ cmd_push() {
       sn="$(skill_display_name "$sd")"
     fi
 
-    local dest="$skills_subdir/$sn"
-    rm -rf "$dest"
-    cp -r "$sd" "$dest"
-    rm -rf "$dest/.git"
-    info "Staged: $sn"
-    pushed=$((pushed + 1))
+    # Check manifest for scope
+    local scope; scope="$(read_manifest_entry "$manifest" "$sn" "scope")"
+
+    if [[ -n "$scope" ]]; then
+      # Known skill: route by scope
+      local dest_dir
+      if [[ "$scope" == "common" ]]; then
+        dest_dir="$tmpdir/skills/$sn"
+      else
+        dest_dir="$tmpdir/$scope/$sn"
+      fi
+      mkdir -p "$(dirname "$dest_dir")"
+      rm -rf "$dest_dir"
+      cp -r "$sd" "$dest_dir"
+      rm -rf "$dest_dir/.git"
+      info "Staged: $sn -> ${scope}/"
+      pushed=$((pushed + 1))
+    else
+      # Untracked skill: collect for user choice
+      untracked_names+=("$sn")
+      untracked_dirs+=("$sd")
+    fi
   done
+
+  # Handle untracked skills: let user choose destination
+  if [[ ${#untracked_names[@]} -gt 0 && -t 0 ]]; then
+    for ((idx=0; idx<${#untracked_names[@]}; idx++)); do
+      local sn="${untracked_names[$idx]}"
+      local sd="${untracked_dirs[$idx]}"
+      local choice_dest=""
+
+      if [[ -n "$project_name" ]]; then
+        printf "\n  ${CYAN}New skill: %s${RESET}\n" "$sn" >&2
+        printf "  Push to:\n" >&2
+        printf "    ${CYAN}1${RESET}) skills/        (common)\n" >&2
+        printf "    ${CYAN}2${RESET}) %s/    (project)\n" "$project_name" >&2
+        printf "  Choice [1/2]: " >&2
+        read -r choice
+        case "$choice" in
+          2) choice_dest="$tmpdir/$project_name/$sn" ;;
+          *) choice_dest="$tmpdir/skills/$sn" ;;
+        esac
+      else
+        choice_dest="$tmpdir/skills/$sn"
+      fi
+
+      mkdir -p "$(dirname "$choice_dest")"
+      rm -rf "$choice_dest"
+      cp -r "$sd" "$choice_dest"
+      rm -rf "$choice_dest/.git"
+      info "Staged: $sn"
+      pushed=$((pushed + 1))
+    done
+  elif [[ ${#untracked_names[@]} -gt 0 ]]; then
+    # Non-interactive: default to common
+    for ((idx=0; idx<${#untracked_names[@]}; idx++)); do
+      local sn="${untracked_names[$idx]}"
+      local sd="${untracked_dirs[$idx]}"
+      local dest="$tmpdir/skills/$sn"
+      mkdir -p "$tmpdir/skills"
+      rm -rf "$dest"
+      cp -r "$sd" "$dest"
+      rm -rf "$dest/.git"
+      info "Staged: $sn -> skills/ (default)"
+      pushed=$((pushed + 1))
+    done
+  fi
+
+  if [[ "$pushed" -eq 0 ]]; then
+    dim "No skills to push."
+    return 0
+  fi
 
   # Commit and push
   git -C "$tmpdir" add -A
