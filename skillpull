@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.2"
+VERSION="0.4.3"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -60,6 +60,20 @@ sedi() {
 # Sets SELECTED_ITEMS=("item1" "item3") with user's choices
 SELECTED_ITEMS=()
 
+_read_key() {
+  local old_settings; old_settings="$(stty -g 2>/dev/null)" || true
+  stty -icanon -echo min 1 time 0 2>/dev/null || true
+  local char; char="$(dd bs=1 count=1 2>/dev/null)"
+  # Check for escape sequence
+  if [[ "$char" == $'\033' ]]; then
+    stty -icanon -echo min 0 time 1 2>/dev/null || true
+    local seq; seq="$(dd bs=2 count=1 2>/dev/null)"
+    char="${char}${seq}"
+  fi
+  [[ -n "$old_settings" ]] && stty "$old_settings" 2>/dev/null || true
+  printf '%s' "$char"
+}
+
 select_menu() {
   local prompt="$1"; shift
   local items=("$@")
@@ -75,15 +89,12 @@ select_menu() {
 
   SELECTED_ITEMS=()
 
-  # Save terminal state
-  local old_stty; old_stty="$(stty -g 2>/dev/null)" || true
-
   # Hide cursor
   printf '\033[?25l' >&2
 
   # Print prompt
   printf "\n  ${CYAN}%s${RESET}\n" "$prompt" >&2
-  printf "  ${DIM}↑↓ move  Space select  Enter confirm${RESET}\n\n" >&2
+  printf "  ${DIM}j/k move  Space select  Enter confirm${RESET}\n\n" >&2
 
   # Draw initial list
   for ((i=0; i<count; i++)); do
@@ -98,17 +109,7 @@ select_menu() {
 
   # Input loop
   while true; do
-    # Read single key
-    local key=""
-    IFS= read -rsn1 key 2>/dev/null || true
-
-    # Handle escape sequences (arrow keys)
-    if [[ "$key" == $'\033' ]]; then
-      local seq1="" seq2=""
-      IFS= read -rsn1 -t 0.1 seq1 2>/dev/null || true
-      IFS= read -rsn1 -t 0.1 seq2 2>/dev/null || true
-      key="${key}${seq1}${seq2}"
-    fi
+    local key; key="$(_read_key)"
 
     case "$key" in
       $'\033[A'|k) # Up
@@ -124,7 +125,7 @@ select_menu() {
           selected="${selected:0:$cursor}0${selected:$((cursor+1))}"
         fi
         ;;
-      '') # Enter - confirm
+      ''|$'\n'|$'\r') # Enter - confirm
         break
         ;;
     esac
@@ -146,9 +147,6 @@ select_menu() {
 
   # Show cursor
   printf '\033[?25h' >&2
-
-  # Restore terminal
-  [[ -n "$old_stty" ]] && stty "$old_stty" 2>/dev/null || true
 
   # Collect selected items
   for ((i=0; i<count; i++)); do
