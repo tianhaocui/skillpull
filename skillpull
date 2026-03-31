@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -1160,7 +1160,15 @@ main() {
       done
       ;;
     list)
-      [[ -z "$repo_url" ]] && { err "Missing source"; usage; exit 1; }
+      if [[ -z "$repo_url" ]]; then
+        local reg; reg="$(read_config_key "registry")"
+        if [[ -z "$reg" ]]; then
+          err "No source specified and no registry set."
+          err "Run 'skillpull init' to set a default skill repo."
+          exit 1
+        fi
+        repo_url="$reg"
+      fi
       local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
       cmd_list "$resolved"
       ;;
