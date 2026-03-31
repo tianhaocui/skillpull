@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.4"
+VERSION="0.4.5"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -209,8 +209,9 @@ remove_alias() {
     err "Alias '$name' not found"
     return 1
   fi
-  # Remove the alias entry
-  sedi "s|\"${name}\":\"[^\"]*\",\?||" "$CONFIG_FILE"
+  # Remove the alias entry (try with trailing comma first, then without)
+  sedi "s|\"${name}\":\"[^\"]*\",||" "$CONFIG_FILE"
+  sedi "s|\"${name}\":\"[^\"]*\"||" "$CONFIG_FILE"
   # Clean up double commas and trailing commas
   sedi 's/,,/,/g; s/,}/}/g; s/{,/{/g' "$CONFIG_FILE"
   info "Alias '$name' removed"
@@ -401,12 +402,26 @@ write_manifest_entry() {
     ' "$manifest" > "$tmp"
     mv "$tmp" "$manifest"
   else
-    # Append before closing braces
-    sedi '/"skills":/,$ {
-      /^  }/ i\'"$entry"',
-    }' "$manifest"
+    # Append new entry before closing braces using awk
+    awk -v new="$entry" '
+      /^  }/ && !done { printf "%s,\n", new; done=1 }
+      { print }
+    ' "$manifest" > "$tmp"
+    mv "$tmp" "$manifest"
     # Fix trailing comma before closing brace
-    sedi ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+    local tmp2; tmp2="$(mktemp)"
+    awk '
+      { lines[NR] = $0; n = NR }
+      END {
+        for (i=1; i<=n; i++) {
+          if (i < n && lines[i] ~ /,$/ && lines[i+1] ~ /^  }/) {
+            sub(/,$/, "", lines[i])
+          }
+          print lines[i]
+        }
+      }
+    ' "$manifest" > "$tmp2"
+    mv "$tmp2" "$manifest"
   fi
 }
 
@@ -666,7 +681,20 @@ cmd_remove() {
     local tmp; tmp="$(mktemp)"
     grep -v "\"${skill_name}\"" "$manifest" > "$tmp" || true
     mv "$tmp" "$manifest"
-    sedi ':a;N;$!ba;s/,\n  }/\n  }/g' "$manifest"
+    # Fix trailing comma before closing brace
+    local tmp2; tmp2="$(mktemp)"
+    awk '
+      { lines[NR] = $0; n = NR }
+      END {
+        for (i=1; i<=n; i++) {
+          if (i < n && lines[i] ~ /,$/ && lines[i+1] ~ /^  }/) {
+            sub(/,$/, "", lines[i])
+          }
+          print lines[i]
+        }
+      }
+    ' "$manifest" > "$tmp2"
+    mv "$tmp2" "$manifest"
   fi
 
   info "Removed: $skill_name from $target_dir"
