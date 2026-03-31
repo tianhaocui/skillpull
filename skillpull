@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.6"
+VERSION="0.4.7"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -1140,7 +1140,7 @@ main() {
   if [[ "$use_all" == "1" ]]; then
     agents=("claude" "codex" "kiro" "cursor")
   elif [[ ${#agents[@]} -eq 0 ]]; then
-    if [[ "$agent_explicit" == "0" && -t 0 && "$cmd" != "installed" && "$cmd" != "update" ]]; then
+    if [[ "$agent_explicit" == "0" && -t 0 && ( "$cmd" == "pull" || "$cmd" == "" || "$cmd" == "remove" || "$cmd" == "push" ) ]]; then
       # Interactive terminal, no agent flag -> let user choose
       select_menu "Install to which tools?" "claude (.claude/skills)" "codex (.codex/skills)" "kiro (.kiro/skills)" "cursor (.cursor/rules)"
       if [[ ${#SELECTED_ITEMS[@]} -eq 0 ]]; then
