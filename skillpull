@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -670,19 +670,18 @@ cmd_push() {
 }
 
 cmd_uninstall() {
-  local global_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
+  local self; self="$(realpath "$0" 2>/dev/null || echo "$0")"
+  local local_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
 
   printf "\n  ${CYAN}Uninstall skillpull${RESET}\n\n"
 
-  # Remove binary
-  if [[ -f "$global_bin" ]]; then
-    rm -f "$global_bin"
-    info "Removed $global_bin"
-  else
-    dim "Binary not found at $global_bin"
+  # Remove local binary if exists
+  if [[ -f "$local_bin" ]]; then
+    rm -f "$local_bin"
+    info "Removed $local_bin"
   fi
 
-  # Ask about config
+  # Remove config
   if [[ -d "$CONFIG_DIR" ]]; then
     printf "  Remove config (~/.config/skillpull)? (y/n) "
     read -r yn
@@ -694,13 +693,16 @@ cmd_uninstall() {
     fi
   fi
 
-  # npm global
-  if command -v npm &>/dev/null && npm ls -g skillpull &>/dev/null 2>&1; then
-    printf "  Also run 'npm uninstall -g skillpull'? (y/n) "
-    read -r yn
-    if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-      npm uninstall -g skillpull
-      info "npm global package removed"
+  # npm global uninstall
+  if command -v npm &>/dev/null; then
+    local npm_global; npm_global="$(npm root -g 2>/dev/null)/../bin/skillpull"
+    if [[ -f "$npm_global" ]] || npm ls -g skillpull &>/dev/null 2>&1; then
+      printf "  Remove npm global package? (y/n) "
+      read -r yn
+      if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+        npm uninstall -g skillpull 2>/dev/null
+        info "npm global package removed"
+      fi
     fi
   fi
 
