@@ -1,9 +1,13 @@
 {
   "name": "skillpull",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Sync AI agent skills from Git repositories to Claude, Codex, Kiro, and Cursor",
   "bin": {
     "skillpull": "./skillpull"
+  },
+  "scripts": {
+    "postinstall": "echo '✓ skillpull installed. Run: skillpull init'",
+    "preuninstall": "echo '✓ skillpull uninstalled.'"
   },
   "keywords": [
     "ai",
