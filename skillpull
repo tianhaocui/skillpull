@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.1"
+VERSION="0.4.2"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -951,7 +951,11 @@ cmd_alias() {
 }
 
 cmd_search() {
-  local keyword="$1"
+  local keyword="${1:-}"
+  if [[ -z "$keyword" && -t 0 ]]; then
+    printf "  Search keyword: "
+    read -r keyword
+  fi
   [[ -z "$keyword" ]] && { err "Usage: skillpull search <keyword>"; return 1; }
 
   dim "Searching GitHub for '$keyword' ..."
