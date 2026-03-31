@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.7"
+VERSION="0.4.0"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -53,6 +53,109 @@ sedi() {
   else
     sed -i "$@"
   fi
+}
+
+# ── Interactive multi-select menu (bash 3 compatible) ──
+# Usage: select_menu "prompt" item1 item2 item3 ...
+# Sets SELECTED_ITEMS=("item1" "item3") with user's choices
+SELECTED_ITEMS=()
+
+select_menu() {
+  local prompt="$1"; shift
+  local items=("$@")
+  local count=${#items[@]}
+  local cursor=0
+  local i
+
+  # Track selected state with a simple string: "0" = unselected, "1" = selected
+  local selected=""
+  for ((i=0; i<count; i++)); do
+    selected="${selected}0"
+  done
+
+  SELECTED_ITEMS=()
+
+  # Save terminal state
+  local old_stty; old_stty="$(stty -g 2>/dev/null)" || true
+
+  # Hide cursor
+  printf '\033[?25l' >&2
+
+  # Print prompt
+  printf "\n  ${CYAN}%s${RESET}\n" "$prompt" >&2
+  printf "  ${DIM}↑↓ move  Space select  Enter confirm${RESET}\n\n" >&2
+
+  # Draw initial list
+  for ((i=0; i<count; i++)); do
+    local marker="[ ]"
+    if [[ "${selected:$i:1}" == "1" ]]; then marker="[x]"; fi
+    if [[ $i -eq $cursor ]]; then
+      printf "  ${CYAN}> %s %s${RESET}\n" "$marker" "${items[$i]}" >&2
+    else
+      printf "    %s %s\n" "$marker" "${items[$i]}" >&2
+    fi
+  done
+
+  # Input loop
+  while true; do
+    # Read single key
+    local key=""
+    IFS= read -rsn1 key 2>/dev/null || true
+
+    # Handle escape sequences (arrow keys)
+    if [[ "$key" == $'\033' ]]; then
+      local seq1="" seq2=""
+      IFS= read -rsn1 -t 0.1 seq1 2>/dev/null || true
+      IFS= read -rsn1 -t 0.1 seq2 2>/dev/null || true
+      key="${key}${seq1}${seq2}"
+    fi
+
+    case "$key" in
+      $'\033[A'|k) # Up
+        [[ $cursor -gt 0 ]] && cursor=$((cursor - 1))
+        ;;
+      $'\033[B'|j) # Down
+        [[ $cursor -lt $((count - 1)) ]] && cursor=$((cursor + 1))
+        ;;
+      ' ') # Space - toggle selection
+        if [[ "${selected:$cursor:1}" == "0" ]]; then
+          selected="${selected:0:$cursor}1${selected:$((cursor+1))}"
+        else
+          selected="${selected:0:$cursor}0${selected:$((cursor+1))}"
+        fi
+        ;;
+      '') # Enter - confirm
+        break
+        ;;
+    esac
+
+    # Redraw: move cursor up by $count lines
+    printf '\033[%dA' "$count" >&2
+
+    for ((i=0; i<count; i++)); do
+      printf '\033[2K' >&2  # Clear line
+      local marker="[ ]"
+      if [[ "${selected:$i:1}" == "1" ]]; then marker="[x]"; fi
+      if [[ $i -eq $cursor ]]; then
+        printf "  ${CYAN}> %s %s${RESET}\n" "$marker" "${items[$i]}" >&2
+      else
+        printf "    %s %s\n" "$marker" "${items[$i]}" >&2
+      fi
+    done
+  done
+
+  # Show cursor
+  printf '\033[?25h' >&2
+
+  # Restore terminal
+  [[ -n "$old_stty" ]] && stty "$old_stty" 2>/dev/null || true
+
+  # Collect selected items
+  for ((i=0; i<count; i++)); do
+    if [[ "${selected:$i:1}" == "1" ]]; then
+      SELECTED_ITEMS+=("${items[$i]}")
+    fi
+  done
 }
 
 # ── Cleanup ──
@@ -376,6 +479,28 @@ cmd_pull() {
       return 1
     fi
     skills=("${matched[@]}")
+  elif [[ ${#skills[@]} -gt 1 && -t 0 ]]; then
+    # Multiple skills, no filter, interactive terminal -> let user choose
+    local names=()
+    for sd in "${skills[@]}"; do
+      names+=("$(skill_display_name "$sd")")
+    done
+    select_menu "Select skills to install:" "${names[@]}"
+    if [[ ${#SELECTED_ITEMS[@]} -eq 0 ]]; then
+      warn "No skills selected"
+      return 0
+    fi
+    local matched=()
+    for sd in "${skills[@]}"; do
+      local sn; sn="$(skill_display_name "$sd")"
+      for sel in "${SELECTED_ITEMS[@]}"; do
+        if [[ "$sn" == "$sel" ]]; then
+          matched+=("$sd")
+          break
+        fi
+      done
+    done
+    skills=("${matched[@]}")
   fi
 
   mkdir -p "$target_dir"
@@ -500,8 +625,37 @@ cmd_installed() {
 }
 
 cmd_remove() {
-  local skill_name="$1" target_dir="$2" agent="${3:-claude}"
+  local skill_name="${1:-}" target_dir="$2" agent="${3:-claude}"
   local fmt; fmt="$(agent_format "$agent")"
+
+  # No skill name provided -> interactive select
+  if [[ -z "$skill_name" && -t 0 ]]; then
+    if [[ ! -d "$target_dir" ]]; then
+      warn "No skills directory found at $target_dir"
+      return 0
+    fi
+    local installed_skills=()
+    local installed_names=()
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && installed_skills+=("$d") && installed_names+=("$(skill_display_name "$d")")
+    done < <(discover_skills "$target_dir")
+
+    if [[ ${#installed_skills[@]} -eq 0 ]]; then
+      warn "No skills installed in $target_dir"
+      return 0
+    fi
+
+    select_menu "Select skills to remove:" "${installed_names[@]}"
+    if [[ ${#SELECTED_ITEMS[@]} -eq 0 ]]; then
+      warn "No skills selected"
+      return 0
+    fi
+
+    for sel in "${SELECTED_ITEMS[@]}"; do
+      cmd_remove "$sel" "$target_dir" "$agent"
+    done
+    return 0
+  fi
 
   if [[ "$fmt" == "mdc" ]]; then
     local dest="$target_dir/${skill_name}.mdc"
@@ -916,10 +1070,11 @@ main() {
       fi
       echo ""
       info "Run 'skillpull init' to set up your default skill repo."
-    else
-      usage
+      exit 0
     fi
-    exit 0
+
+    # Already installed, no args -> treat as pull (will use registry + interactive select)
+    cmd="pull"
   fi
 
   while [[ $# -gt 0 ]]; do
@@ -982,7 +1137,16 @@ main() {
 
   case "${cmd:-}" in
     pull|"")
-      [[ -z "$repo_url" ]] && { err "Missing source"; usage; exit 1; }
+      if [[ -z "$repo_url" ]]; then
+        # No source given, try registry
+        local reg; reg="$(read_config_key "registry")"
+        if [[ -z "$reg" ]]; then
+          err "No source specified and no registry set."
+          err "Run 'skillpull init' to set a default skill repo."
+          exit 1
+        fi
+        repo_url="$reg"
+      fi
       local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
       # If resolve_repo_url returned registry URL for bare name, use original as skill filter
       if [[ "$resolved" != "$repo_url" && "$repo_url" != @* && "$repo_url" != */* && "$repo_url" != *"://"* && "$repo_url" != git@* ]]; then
@@ -1034,7 +1198,6 @@ main() {
       done
       ;;
     remove)
-      [[ -z "$skill_name" ]] && { err "Missing skill name"; usage; exit 1; }
       for agent in "${agents[@]}"; do
         local target_dir
         target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue

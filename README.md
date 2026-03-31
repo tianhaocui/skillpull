@@ -115,6 +115,12 @@ description: What this skill does
 Skill content here...
 ```
 
+## Requirements
+
+- macOS, Linux, or Windows (via [WSL](https://learn.microsoft.com/en-us/windows/wsl/) or [Git Bash](https://gitforwindows.org/))
+- Git
+- Bash 3+
+
 ## License
 
 MIT
