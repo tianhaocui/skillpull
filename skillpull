@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.7"
+VERSION="0.4.8"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -166,7 +166,11 @@ make_tmp() { _TMPDIR="$(mktemp -d "/tmp/${TMPDIR_PREFIX}.XXXXXX")"; }
 # ── Config helpers ──
 ensure_config() {
   mkdir -p "$CONFIG_DIR"
-  [[ -f "$CONFIG_FILE" ]] || echo '{"aliases":{},"registry":""}' > "$CONFIG_FILE"
+  [[ -f "$CONFIG_FILE" ]] || echo '{"aliases":{},"registry":"","project":""}' > "$CONFIG_FILE"
+  # Migrate: add "project" key if missing
+  if ! grep -q '"project"' "$CONFIG_FILE" 2>/dev/null; then
+    sedi 's/}$/,"project":""}/' "$CONFIG_FILE"
+  fi
 }
 
 read_config_key() {
@@ -246,6 +250,18 @@ set_registry() {
   info "Default registry set to: $url"
 }
 
+set_project() {
+  local name="$1"
+  ensure_config
+  local esc_name; esc_name="$(_json_escape "$name")"
+  sedi "s|\"project\":\"[^\"]*\"|\"project\":\"${esc_name}\"|" "$CONFIG_FILE"
+  if [[ -n "$name" ]]; then
+    info "Default project set to: $name"
+  else
+    info "Default project cleared"
+  fi
+}
+
 # ── URL resolution ──
 # Supports: full URL, user/repo shortname, @alias, bare skill name (from registry)
 resolve_repo_url() {
@@ -307,6 +323,31 @@ discover_skills() {
     -not -path "*/node_modules/*" \
     -not -path "*/.skillpull.json" \
     -exec dirname {} \; 2>/dev/null | sort -u
+}
+
+# Scoped discovery: skills/ folder (common) + optional project-specific skills
+discover_skills_scoped() {
+  local dir="$1" project="${2:-}"
+  local results=()
+
+  # Common skills: $dir/skills/*/SKILL.md
+  local d
+  for d in "$dir/skills"/*/SKILL.md; do
+    [[ -f "$d" ]] || continue
+    local skill_dir; skill_dir="$(dirname "$d")"
+    results+=("$skill_dir")
+  done
+
+  # Project-specific skills: $dir/$project/*/SKILL.md
+  if [[ -n "$project" ]]; then
+    for d in "$dir/$project"/*/SKILL.md; do
+      [[ -f "$d" ]] || continue
+      local skill_dir; skill_dir="$(dirname "$d")"
+      results+=("$skill_dir")
+    done
+  fi
+
+  printf '%s\n' "${results[@]}" 2>/dev/null | sort -u
 }
 
 # ── SKILL.md → .mdc conversion (for Cursor) ──
@@ -452,7 +493,7 @@ get_branch() {
 # ── Commands ──
 
 cmd_pull() {
-  local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}"
+  local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}" project="${7:-}"
   local fmt; fmt="$(agent_format "$agent")"
   make_tmp
   local tmpdir="$_TMPDIR"
@@ -464,9 +505,17 @@ cmd_pull() {
   local branch; branch="$(get_branch "$tmpdir")"
   local skills=()
 
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && skills+=("$d")
-  done < <(discover_skills "$tmpdir")
+  # Use scoped discovery if project is set, otherwise discover all
+  if [[ -n "$project" ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && skills+=("$d")
+    done < <(discover_skills_scoped "$tmpdir" "$project")
+    [[ -n "$project" ]] && dim "Project scope: $project"
+  else
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && skills+=("$d")
+    done < <(discover_skills "$tmpdir")
+  fi
 
   if [[ ${#skills[@]} -eq 0 ]]; then
     err "No skills found in repository"
@@ -551,7 +600,7 @@ cmd_pull() {
 }
 
 cmd_list() {
-  local repo_url="$1"
+  local repo_url="$1" project="${2:-}"
   make_tmp
   local tmpdir="$_TMPDIR"
 
@@ -559,9 +608,16 @@ cmd_list() {
   clone_repo "$repo_url" "${BRANCH:-}" "$tmpdir" || return 1
 
   local skills=()
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && skills+=("$d")
-  done < <(discover_skills "$tmpdir")
+  if [[ -n "$project" ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && skills+=("$d")
+    done < <(discover_skills_scoped "$tmpdir" "$project")
+    dim "Project scope: $project"
+  else
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && skills+=("$d")
+    done < <(discover_skills "$tmpdir")
+  fi
 
   if [[ ${#skills[@]} -eq 0 ]]; then
     err "No skills found in repository"
@@ -923,6 +979,33 @@ cmd_init() {
     set_registry "$resolved"
   fi
 
+  # ── Project scope ──
+  local current_project; current_project="$(read_config_key "project")"
+  echo ""
+  printf "  ${CYAN}Project scope${RESET} ${DIM}(optional)${RESET}\n"
+  printf "  ${DIM}If your skill repo has project-specific subfolders, set a default here.${RESET}\n"
+  printf "  ${DIM}Skills from both root level and the project subfolder will be pulled.${RESET}\n\n"
+
+  if [[ -n "$current_project" ]]; then
+    printf "  Current: ${GREEN}%s${RESET}\n\n" "$current_project"
+    printf "  Project name (Enter to keep, 'none' to clear): "
+  else
+    printf "  Project name (Enter to skip): "
+  fi
+
+  read -r project_input
+  project_input="$(echo "$project_input" | tr -d '[:cntrl:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  if [[ -z "$project_input" ]]; then
+    if [[ -n "$current_project" ]]; then
+      dim "Keeping current project: $current_project"
+    fi
+  elif [[ "$project_input" == "none" ]]; then
+    set_project ""
+  else
+    set_project "$project_input"
+  fi
+
   echo ""
   printf "  ${CYAN}What's next:${RESET}\n"
   printf "    skillpull list              List available skills\n"
@@ -1034,6 +1117,8 @@ OPTIONS:
   --global, -g          Install to user-level directory
   --path <dir>          Install to a custom directory
   --branch <ref>        Use a specific branch/tag/commit
+  --project <name>      Include project-specific skills from <name>/ subfolder
+                        (defaults to value set in 'skillpull init')
   --force, -f           Overwrite existing skills
   --dry-run             Preview without making changes
   --quiet, -q           Suppress non-error output
@@ -1041,7 +1126,7 @@ OPTIONS:
   --version             Show version
 
 EXAMPLES:
-  skillpull init                                    # Setup default skill repo
+  skillpull init                                    # Setup default skill repo & project
   skillpull tianhaocui/ai-skills                    # GitHub shortname
   skillpull @work plan-first-development --global   # From alias
   skillpull search coding-standards                 # Search GitHub
@@ -1051,13 +1136,14 @@ EXAMPLES:
   skillpull tianhaocui/ai-skills --cursor           # Convert to .mdc
   skillpull update                                  # Update all installed skills
   skillpull push tianhaocui/ai-skills               # Push local skills to remote
+  skillpull user/repo --project my-app              # Common + project-specific skills
 HELP
 }
 
 # ── Argument parsing & dispatch ──
 main() {
   local cmd="" repo_url="" skill_name="" custom_path=""
-  local force=0 dry_run=0 is_global=0 use_all=0 agent_explicit=0
+  local force=0 dry_run=0 is_global=0 use_all=0 agent_explicit=0 project_name=""
   local agents=()
   local alias_args=()
   QUIET=0; BRANCH=""
@@ -1092,6 +1178,7 @@ main() {
       --global|-g)  is_global=1; shift ;;
       --path)       [[ $# -lt 2 ]] && { err "--path requires a directory"; exit 1; }; custom_path="$2"; shift 2 ;;
       --branch)     [[ $# -lt 2 ]] && { err "--branch requires a ref"; exit 1; }; BRANCH="$2"; shift 2 ;;
+      --project)    [[ $# -lt 2 ]] && { err "--project requires a name"; exit 1; }; project_name="$2"; shift 2 ;;
       --force|-f)   force=1; shift ;;
       --dry-run)    dry_run=1; shift ;;
       --quiet|-q)   QUIET=1; shift ;;
@@ -1158,6 +1245,10 @@ main() {
 
   case "${cmd:-}" in
     pull|"")
+      # Fall back to configured project if --project not specified
+      if [[ -z "$project_name" ]]; then
+        project_name="$(read_config_key "project")"
+      fi
       if [[ -z "$repo_url" ]]; then
         # No source given, try registry
         local reg; reg="$(read_config_key "registry")"
@@ -1177,10 +1268,14 @@ main() {
         local target_dir
         target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
         dim "Target: $agent -> $target_dir"
-        cmd_pull "$resolved" "$skill_name" "$target_dir" "$force" "$dry_run" "$agent"
+        cmd_pull "$resolved" "$skill_name" "$target_dir" "$force" "$dry_run" "$agent" "$project_name"
       done
       ;;
     list)
+      # Fall back to configured project if --project not specified
+      if [[ -z "$project_name" ]]; then
+        project_name="$(read_config_key "project")"
+      fi
       if [[ -z "$repo_url" ]]; then
         local reg; reg="$(read_config_key "registry")"
         if [[ -z "$reg" ]]; then
@@ -1191,7 +1286,7 @@ main() {
         repo_url="$reg"
       fi
       local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
-      cmd_list "$resolved"
+      cmd_list "$resolved" "$project_name"
       ;;
     search)
       cmd_search "${skill_name:-}"
