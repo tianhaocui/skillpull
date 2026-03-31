@@ -669,6 +669,38 @@ cmd_push() {
   info "Done. $pushed skill(s) pushed to $resolved"
 }
 
+cmd_init() {
+  ensure_config
+  local current; current="$(read_config_key "registry")"
+
+  printf "\n  ${CYAN}skillpull init${RESET}\n\n"
+
+  if [[ -n "$current" ]]; then
+    printf "  Current registry: ${GREEN}%s${RESET}\n\n" "$current"
+    printf "  Enter new skill repo (blank to keep current): "
+  else
+    printf "  ${DIM}Set a default skill repository so you can run 'skillpull <skill-name>' directly.${RESET}\n"
+    printf "  ${DIM}Supports: user/repo, full URL, or SSH.${RESET}\n\n"
+    printf "  Skill repo: "
+  fi
+
+  read -r repo_input
+
+  if [[ -n "$repo_input" ]]; then
+    local resolved; resolved="$(resolve_repo_url "$repo_input")" || return 1
+    set_registry "$resolved"
+  elif [[ -z "$current" ]]; then
+    warn "No registry set. Run 'skillpull init' again or 'skillpull registry <repo>'."
+    return 0
+  else
+    dim "Keeping current registry: $current"
+  fi
+
+  echo ""
+  info "You're all set. Try: skillpull list"
+  echo ""
+}
+
 cmd_alias() {
   local subcmd="${1:-list}" name="${2:-}" url="${3:-}"
   case "$subcmd" in
@@ -737,6 +769,7 @@ usage() {
 skillpull — Sync AI agent skills from Git repositories
 
 USAGE:
+  skillpull init
   skillpull <source> [skill-name] [options]
   skillpull list <source>
   skillpull search <keyword>
@@ -773,6 +806,7 @@ OPTIONS:
   --version             Show version
 
 EXAMPLES:
+  skillpull init                                    # Setup default skill repo
   skillpull tianhaocui/ai-skills                    # GitHub shortname
   skillpull @work plan-first-development --global   # From alias
   skillpull search coding-standards                 # Search GitHub
@@ -815,6 +849,7 @@ main() {
       remove)       cmd="remove"; shift ;;
       update)       cmd="update"; shift ;;
       push)         cmd="push"; shift ;;
+      init)         cmd="init"; shift ;;
       search)       cmd="search"; shift ;;
       alias)        cmd="alias"; shift
                     # Collect remaining args for alias subcommand
@@ -873,6 +908,9 @@ main() {
       ;;
     search)
       cmd_search "${skill_name:-}"
+      ;;
+    init)
+      cmd_init
       ;;
     alias)
       cmd_alias "${alias_args[@]}"
