@@ -1,6 +1,6 @@
 {
   "name": "skillpull",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Sync AI agent skills from Git repositories to Claude, Codex, Kiro, and Cursor",
   "bin": {
     "skillpull": "./skillpull"

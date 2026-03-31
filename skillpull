@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -880,25 +880,21 @@ main() {
   QUIET=0; BRANCH=""
 
   if [[ $# -eq 0 ]]; then
-    # If running via npx or not installed globally, offer to install
+    # If running via npx or not installed globally, auto-install
     local self; self="$(realpath "$0" 2>/dev/null || echo "$0")"
     local global_bin="${SKILLPULL_INSTALL_DIR:-$HOME/.local/bin}/skillpull"
 
     if [[ "$self" != "$global_bin" && ! -f "$global_bin" ]]; then
-      printf "\n  ${CYAN}Install skillpull globally?${RESET} (y/n) "
-      read -r yn
-      if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-        mkdir -p "$(dirname "$global_bin")"
-        cp "$self" "$global_bin"
-        chmod +x "$global_bin"
-        info "Installed to $global_bin"
-        if ! echo "$PATH" | tr ':' '\n' | grep -qx "$(dirname "$global_bin")"; then
-          warn "Add to PATH: export PATH=\"$(dirname "$global_bin"):\$PATH\""
-        fi
+      mkdir -p "$(dirname "$global_bin")"
+      cp "$self" "$global_bin"
+      chmod +x "$global_bin"
+      info "Installed skillpull to $global_bin"
+      if ! echo "$PATH" | tr ':' '\n' | grep -qx "$(dirname "$global_bin")"; then
+        warn "Add to PATH: export PATH=\"$(dirname "$global_bin"):\$PATH\""
       fi
+    else
+      usage
     fi
-
-    cmd_init
     exit 0
   fi
 
