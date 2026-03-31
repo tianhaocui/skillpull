@@ -1,6 +1,6 @@
 {
   "name": "skillpull",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Sync AI agent skills from Git repositories to Claude, Codex, Kiro, and Cursor",
   "bin": {
     "skillpull": "./skillpull"
@@ -30,6 +30,7 @@
   ],
   "os": [
     "linux",
-    "darwin"
+    "darwin",
+    "win32"
   ]
 }
