@@ -43,7 +43,7 @@ skillpull
 | `skillpull list [source]` | List available skills in a repo |
 | `skillpull search <keyword>` | Search GitHub for skill repos |
 | `skillpull update` | Update all installed skills to latest |
-| `skillpull push [target-repo]` | Push local skills back to a remote repo |
+| `skillpull push [target-repo] [skill]` | Push local skills (or a single skill) to a remote repo |
 | `skillpull installed` | Show locally installed skills |
 | `skillpull remove <skill>` | Remove an installed skill |
 | `skillpull registry <repo>` | Set or view global default skill repo |
@@ -126,8 +126,9 @@ skillpull @work my-skill
 Push local skills back to a remote Git repo:
 
 ```bash
-skillpull push user/repo
-skillpull push                  # uses registry if set
+skillpull push user/repo              # push all skills
+skillpull push user/repo my-skill     # push a single skill
+skillpull push                        # uses registry if set
 ```
 
 ## Options
