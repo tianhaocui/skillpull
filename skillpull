@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.2"
+VERSION="0.5.3"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
@@ -837,7 +837,7 @@ cmd_update() {
 }
 
 cmd_push() {
-  local target_dir="$1" repo_url="$2" agent="$3"
+  local target_dir="$1" repo_url="$2" agent="$3" skill_filter="${4:-}"
   local fmt; fmt="$(agent_format "$agent")"
 
   if [[ ! -d "$target_dir" ]]; then
@@ -889,6 +889,37 @@ cmd_push() {
   if [[ ${#skills[@]} -eq 0 ]]; then
     err "No skills found in $target_dir"
     return 1
+  fi
+
+  # Filter by name if specified
+  if [[ -n "$skill_filter" ]]; then
+    local matched=()
+    for sd in "${skills[@]}"; do
+      local sn
+      if [[ "$fmt" == "mdc" ]]; then
+        sn="$(basename "$sd" .mdc)"
+      else
+        sn="$(skill_display_name "$sd")"
+      fi
+      local dn; dn="$(basename "$sd")"
+      if [[ "$sn" == "$skill_filter" || "$dn" == "$skill_filter" ]]; then
+        matched+=("$sd")
+      fi
+    done
+    if [[ ${#matched[@]} -eq 0 ]]; then
+      err "Skill '$skill_filter' not found locally. Available skills:"
+      for sd in "${skills[@]}"; do
+        local sn
+        if [[ "$fmt" == "mdc" ]]; then
+          sn="$(basename "$sd" .mdc)"
+        else
+          sn="$(skill_display_name "$sd")"
+        fi
+        printf "    - %s\n" "$sn" >&2
+      done
+      return 1
+    fi
+    skills=("${matched[@]}")
   fi
 
   # Classify skills by scope
@@ -1246,7 +1277,7 @@ USAGE:
   skillpull alias rm <name>
   skillpull registry <repo-url>
   skillpull update [options]
-  skillpull push [target-repo] [options]
+  skillpull push [target-repo] [skill-name] [options]
   skillpull installed [--global]
   skillpull remove <skill-name> [--global]
   skillpull uninstall
@@ -1293,7 +1324,8 @@ EXAMPLES:
   skillpull tianhaocui/ai-skills --all               # All tools at once
   skillpull tianhaocui/ai-skills --cursor            # Convert to .mdc
   skillpull update                                   # Update all installed skills
-  skillpull push tianhaocui/ai-skills                # Push local skills to remote
+  skillpull push tianhaocui/ai-skills                # Push all local skills to remote
+  skillpull push tianhaocui/ai-skills my-skill       # Push a single skill to remote
   skillpull user/repo --project my-app               # Common + project-specific skills
 HELP
 }
@@ -1374,6 +1406,8 @@ main() {
           repo_url="$1"
         elif [[ "$cmd" == "push" && -z "$repo_url" ]]; then
           repo_url="$1"
+        elif [[ "$cmd" == "push" && -n "$repo_url" && -z "$skill_name" ]]; then
+          skill_name="$1"
         else
           warn "Ignoring unexpected argument: $1"
         fi
@@ -1502,7 +1536,7 @@ main() {
       for agent in "${agents[@]}"; do
         local target_dir
         target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
-        cmd_push "$target_dir" "$repo_url" "$agent"
+        cmd_push "$target_dir" "$repo_url" "$agent" "$skill_name"
       done
       ;;
     *)
