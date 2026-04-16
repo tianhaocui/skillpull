@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.3"
+VERSION="0.6.0"
 MANIFEST_FILE=".skillpull.json"
 TMPDIR_PREFIX="skillpull"
 CONFIG_DIR="$HOME/.config/skillpull"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+SHARED_HUB="$HOME/.agents/skills"
 
 # ── Agent targets (bash 3 compatible) ──
 agent_project() {
@@ -352,17 +353,20 @@ discover_skills() {
 }
 
 # Scoped discovery: skills/ folder (common) + optional project-specific skills
+# When project_only=1, skip the common skills/ folder entirely
 discover_skills_scoped() {
-  local dir="$1" project="${2:-}"
+  local dir="$1" project="${2:-}" project_only="${3:-0}"
   local results=()
 
-  # Common skills: $dir/skills/*/SKILL.md
-  local d
-  for d in "$dir/skills"/*/SKILL.md; do
-    [[ -f "$d" ]] || continue
-    local skill_dir; skill_dir="$(dirname "$d")"
-    results+=("$skill_dir")
-  done
+  # Common skills: $dir/skills/*/SKILL.md (skip when project_only)
+  if [[ "$project_only" != "1" ]]; then
+    local d
+    for d in "$dir/skills"/*/SKILL.md; do
+      [[ -f "$d" ]] || continue
+      local skill_dir; skill_dir="$(dirname "$d")"
+      results+=("$skill_dir")
+    done
+  fi
 
   # Project-specific skills: $dir/$project/*/SKILL.md
   if [[ -n "$project" ]]; then
@@ -519,7 +523,7 @@ get_branch() {
 # ── Commands ──
 
 cmd_pull() {
-  local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}" project="${7:-}"
+  local repo_url="$1" skill_filter="${2:-}" target_dir="$3" force="${4:-0}" dry_run="${5:-0}" agent="${6:-claude}" project="${7:-}" project_only="${8:-0}"
   local fmt; fmt="$(agent_format "$agent")"
   make_tmp
   local tmpdir="$_TMPDIR"
@@ -535,8 +539,12 @@ cmd_pull() {
   if [[ -n "$project" ]]; then
     while IFS= read -r d; do
       [[ -n "$d" ]] && skills+=("$d")
-    done < <(discover_skills_scoped "$tmpdir" "$project")
-    [[ -n "$project" ]] && dim "Project scope: $project"
+    done < <(discover_skills_scoped "$tmpdir" "$project" "$project_only")
+    if [[ "$project_only" == "1" ]]; then
+      dim "Project scope: $project (only)"
+    else
+      dim "Project scope: $project"
+    fi
   else
     while IFS= read -r d; do
       [[ -n "$d" ]] && skills+=("$d")
@@ -603,29 +611,41 @@ cmd_pull() {
       write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}" "$scope"
       info "Installed: $sn -> $dest (converted to .mdc)"
     else
-      # Claude/Codex/Kiro: copy skill folder as-is
+      # Claude/Codex/Kiro: write to shared hub, symlink from agent dir
       local dest="$target_dir/$sn"
 
-      if [[ -d "$dest" && "$force" != "1" ]]; then
-        local old_ver; old_ver="$(parse_frontmatter "$dest/SKILL.md" "version")"
+      if [[ (-d "$dest" || -L "$dest") && "$force" != "1" ]]; then
+        local check_dir="$dest"
+        [[ -L "$dest" ]] && check_dir="$(readlink -f "$dest")"
+        local old_ver; old_ver="$(parse_frontmatter "$check_dir/SKILL.md" "version" 2>/dev/null)"
         warn "Skill '$sn' already exists (${old_ver:-unknown} -> ${ver:-unknown}), use --force to overwrite"
         continue
       fi
 
       if [[ "$dry_run" == "1" ]]; then
-        info "[dry-run] Would install: $sn -> $dest"
+        info "[dry-run] Would install: $sn -> $SHARED_HUB/$sn (symlink from $dest)"
         continue
       fi
 
-      rm -rf "$dest"
-      cp -r "$sd" "$dest"
-      rm -rf "$dest/.git"
-      if [[ -d "$dest/scripts" ]]; then
-        chmod +x "$dest/scripts/"* 2>/dev/null || true
+      # Write to shared hub (single source of truth)
+      local hub_dest="$SHARED_HUB/$sn"
+      mkdir -p "$SHARED_HUB"
+      rm -rf "$hub_dest"
+      cp -r "$sd" "$hub_dest"
+      rm -rf "$hub_dest/.git"
+      if [[ -d "$hub_dest/scripts" ]]; then
+        chmod +x "$hub_dest/scripts/"* 2>/dev/null || true
+      fi
+
+      # Symlink from agent dir (or skip if target IS the hub)
+      if [[ "$(cd "$target_dir" 2>/dev/null && pwd -P)" != "$(cd "$SHARED_HUB" 2>/dev/null && pwd -P)" ]]; then
+        mkdir -p "$target_dir"
+        rm -rf "$dest"
+        ln -s "$hub_dest" "$dest"
       fi
 
       write_manifest_entry "$manifest" "$sn" "$repo_url" "$branch" "$commit" "${ver:-}" "$scope"
-      info "Installed: $sn${ver:+ (v$ver)} -> $dest"
+      info "Installed: $sn${ver:+ (v$ver)} -> $hub_dest (symlink from $dest)"
     fi
     installed=$((installed + 1))
   done
@@ -634,7 +654,7 @@ cmd_pull() {
 }
 
 cmd_list() {
-  local repo_url="$1" project="${2:-}"
+  local repo_url="$1" project="${2:-}" project_only="${3:-0}"
   make_tmp
   local tmpdir="$_TMPDIR"
 
@@ -645,8 +665,12 @@ cmd_list() {
   if [[ -n "$project" ]]; then
     while IFS= read -r d; do
       [[ -n "$d" ]] && skills+=("$d")
-    done < <(discover_skills_scoped "$tmpdir" "$project")
-    dim "Project scope: $project"
+    done < <(discover_skills_scoped "$tmpdir" "$project" "$project_only")
+    if [[ "$project_only" == "1" ]]; then
+      dim "Project scope: $project (only)"
+    else
+      dim "Project scope: $project"
+    fi
   else
     while IFS= read -r d; do
       [[ -n "$d" ]] && skills+=("$d")
@@ -747,7 +771,7 @@ cmd_remove() {
     rm -f "$dest"
   else
     local dest="$target_dir/$skill_name"
-    if [[ ! -d "$dest" ]]; then
+    if [[ ! -d "$dest" && ! -L "$dest" ]]; then
       local found=""
       while IFS= read -r d; do
         local sn; sn="$(skill_display_name "$d")"
@@ -763,6 +787,16 @@ cmd_remove() {
       dest="$found"
     fi
     rm -rf "$dest"
+
+    # Clean up shared hub if no other symlinks reference it
+    local hub_dest="$SHARED_HUB/$skill_name"
+    if [[ -d "$hub_dest" ]]; then
+      local refs; refs=$(find "$HOME" -maxdepth 4 -type l -lname "$hub_dest" 2>/dev/null | wc -l)
+      if [[ "$refs" -eq 0 ]]; then
+        rm -rf "$hub_dest"
+        dim "Removed from shared hub: $hub_dest"
+      fi
+    fi
   fi
 
   # Clean up manifest entry
@@ -1301,6 +1335,7 @@ OPTIONS:
   --branch <ref>        Use a specific branch/tag/commit
   --project <name>      Include project-specific skills from <name>/ subfolder
                         (defaults to value in .skillpullrc)
+  --project-only        Only pull from the --project subfolder, skip skills/
   --force, -f           Overwrite existing skills
   --dry-run             Preview without making changes
   --quiet, -q           Suppress non-error output
@@ -1327,13 +1362,14 @@ EXAMPLES:
   skillpull push tianhaocui/ai-skills                # Push all local skills to remote
   skillpull push tianhaocui/ai-skills my-skill       # Push a single skill to remote
   skillpull user/repo --project my-app               # Common + project-specific skills
+  skillpull user/repo --project livechat --project-only  # Only livechat/ skills
 HELP
 }
 
 # ── Argument parsing & dispatch ──
 main() {
   local cmd="" repo_url="" skill_name="" custom_path=""
-  local force=0 dry_run=0 is_global=0 use_all=0 agent_explicit=0 project_name=""
+  local force=0 dry_run=0 is_global=0 use_all=0 agent_explicit=0 project_name="" project_only=0
   local agents=()
   local alias_args=()
   QUIET=0; BRANCH=""
@@ -1369,6 +1405,7 @@ main() {
       --path)       [[ $# -lt 2 ]] && { err "--path requires a directory"; exit 1; }; custom_path="$2"; shift 2 ;;
       --branch)     [[ $# -lt 2 ]] && { err "--branch requires a ref"; exit 1; }; BRANCH="$2"; shift 2 ;;
       --project)    [[ $# -lt 2 ]] && { err "--project requires a name"; exit 1; }; project_name="$2"; shift 2 ;;
+      --project-only) project_only=1; shift ;;
       --force|-f)   force=1; shift ;;
       --dry-run)    dry_run=1; shift ;;
       --quiet|-q)   QUIET=1; shift ;;
@@ -1441,6 +1478,10 @@ main() {
       if [[ -z "$project_name" ]]; then
         project_name="$(read_project_rc "project")"
       fi
+      if [[ "$project_only" == "1" && -z "$project_name" ]]; then
+        err "--project-only requires --project <name>"
+        exit 1
+      fi
       if [[ -z "$repo_url" ]]; then
         # Resolve registry: .skillpullrc > global config
         local reg; reg="$(resolve_config "registry")"
@@ -1460,13 +1501,17 @@ main() {
         local target_dir
         target_dir="$(resolve_target_dir "$agent" "$is_global" "$custom_path")" || continue
         dim "Target: $agent -> $target_dir"
-        cmd_pull "$resolved" "$skill_name" "$target_dir" "$force" "$dry_run" "$agent" "$project_name"
+        cmd_pull "$resolved" "$skill_name" "$target_dir" "$force" "$dry_run" "$agent" "$project_name" "$project_only"
       done
       ;;
     list)
       # Resolve project: CLI > .skillpullrc > (none)
       if [[ -z "$project_name" ]]; then
         project_name="$(read_project_rc "project")"
+      fi
+      if [[ "$project_only" == "1" && -z "$project_name" ]]; then
+        err "--project-only requires --project <name>"
+        exit 1
       fi
       if [[ -z "$repo_url" ]]; then
         local reg; reg="$(resolve_config "registry")"
@@ -1478,7 +1523,7 @@ main() {
         repo_url="$reg"
       fi
       local resolved; resolved="$(resolve_repo_url "$repo_url")" || exit 1
-      cmd_list "$resolved" "$project_name"
+      cmd_list "$resolved" "$project_name" "$project_only"
       ;;
     search)
       cmd_search "${skill_name:-}"

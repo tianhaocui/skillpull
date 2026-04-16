@@ -7,6 +7,22 @@ allowed-tools: Bash
 
 # skillpull — AI Agent Skill 管理工具
 
+## 安装
+
+```bash
+# npm 全局安装（推荐）
+npm i -g skillpull
+
+# 或一次性运行（无需安装）
+npx skillpull <repo>
+
+# 或手动安装
+git clone https://github.com/tianhaocui/skillpull.git
+cd skillpull && bash install.sh
+```
+
+安装后验证：`skillpull --version`
+
 ## 概述
 
 skillpull 是一个 CLI 工具，用于从 Git 仓库同步 AI agent skills 到项目中。支持 Claude Code、Codex、Kiro、Cursor 四种目标。
@@ -78,17 +94,24 @@ CLI flags > .skillpullrc (项目级) > ~/.config/skillpull/config.json (全局)
 ```
 
 - `registry`: 留空则使用全局 registry；填写则覆盖全局
-- `project`: 对应 skill 仓库中的项目子目录名，拉取时会同时获取 `skills/`（通用）和 `<project>/`（专属）下的 skills
+- `project`: 对应 skill 仓库中的项目子目录名，拉取时会同时获取 `skills/`（通用）和 `<project>/`（专属）下的 skills。加 `--project-only` 则只拉 `<project>/`，跳过 `skills/`
 
 ### 安装目标
 
-| Target | 目录 | 说明 |
-|--------|------|------|
-| `--claude` | `.claude/skills/` | Claude Code（默认） |
-| `--codex` | `.codex/skills/` | OpenAI Codex CLI |
-| `--kiro` | `.kiro/skills/` | Kiro |
-| `--cursor` | `.cursor/rules/` | Cursor（自动转换为 .mdc） |
-| `--all` | 以上全部 | 一次安装到所有目标 |
+从 v0.6.0 起，skillpull 使用 `~/.agents/skills/` 作为 **single source of truth**。所有 skill 先写入 hub，再在各 agent 目录创建 symlink：
+
+| Target | Agent 目录 | 实际存储 |
+|--------|-----------|---------|
+| `--claude` | `.claude/skills/` → symlink | `~/.agents/skills/` |
+| `--codex` | `.codex/skills/` → symlink | `~/.agents/skills/` |
+| `--kiro` | `.kiro/skills/` → symlink | `~/.agents/skills/` |
+| `--cursor` | `.cursor/rules/` | 物理文件（.mdc 格式，无法 symlink） |
+| `--all` | 以上全部 | hub + symlinks |
+
+好处：
+- 同一个 skill 只有一份副本，节省磁盘
+- 更新 hub 中的 skill，所有 agent 自动同步
+- OpenSpace 不会注册重复的 skill record
 
 ## 命令参考
 
@@ -133,6 +156,9 @@ skillpull code-review --all
 
 # 指定 project（覆盖 .skillpullrc）
 skillpull --project livechat --all
+
+# 只拉取 project 目录下的 skills，不拉 skills/ 通用目录
+skillpull --project livechat --project-only --all
 
 # 指定分支/tag
 skillpull --branch develop --all
@@ -284,9 +310,9 @@ my-project/
 ## 注意事项
 
 - `skillpull init` 是交互式命令，自动化时用 `printf` 管道输入或直接写 `.skillpullrc`
-- `--all` 会安装到 claude/codex/kiro/cursor 四个目标
+- `--all` 会安装到 claude/codex/kiro/cursor 四个目标，skill 存储在 `~/.agents/skills/`，agent 目录为 symlink
 - `-f` (force) 覆盖已有 skills，日常更新建议带上
-- Cursor 目标会自动将 SKILL.md 转换为 .mdc 格式
+- Cursor 目标会自动将 SKILL.md 转换为 .mdc 格式（物理文件，非 symlink）
 - `reference/` 目录下的文件会随 skill 一起安装
-- 全局 skills 安装在 `~/.claude/skills/`（用 `--global`）
-- 项目 skills 安装在 `.claude/skills/`（默认）
+- 全局 skills 安装在 `~/.agents/skills/`（用 `--global`），agent 目录为 symlink
+- 项目 skills 安装在 `.claude/skills/`（默认，项目级 symlink 指向 `.agents/skills/`）
