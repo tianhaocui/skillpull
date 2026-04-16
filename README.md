@@ -105,9 +105,12 @@ skillpull
 
 # Override for a specific pull
 skillpull user/repo --project my-app
+
+# Only pull from the project subfolder, skip skills/
+skillpull user/repo --project my-app --project-only
 ```
 
-Both `skills/` (common) and the project subfolder's skills are pulled together.
+Both `skills/` (common) and the project subfolder's skills are pulled together by default. Use `--project-only` to skip `skills/` and only pull from the project subfolder.
 
 ## Registry & Aliases
 
@@ -139,6 +142,7 @@ skillpull push                        # uses registry if set
 | `--path <dir>` | Install to a custom directory |
 | `--branch <ref>` | Use a specific branch/tag/commit |
 | `--project <name>` | Include project-specific skills (defaults to `.skillpullrc`) |
+| `--project-only` | Only pull from the `--project` subfolder, skip `skills/` |
 | `--force, -f` | Overwrite existing skills |
 | `--dry-run` | Preview without making changes |
 | `--quiet, -q` | Suppress non-error output |
